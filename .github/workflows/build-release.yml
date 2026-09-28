@@ -1,0 +1,174 @@
+name: Build public release candidate
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: public-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and attest unsigned app
+    runs-on: macos-26
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout exact public tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release source and runner
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+          python3 scripts/audit-public-refs.py
+          python3 scripts/validate-public-source.py --tag "$RELEASE_TAG"
+          python3 scripts/verify-package-lock.py
+          python3 - <<'PY'
+          import json, os, subprocess
+          inputs = json.load(open('build-inputs.json'))
+          actual = os.environ.get('ImageVersion')
+          expected = inputs['runner']['imageVersion']
+          if actual != expected:
+              raise SystemExit(f'runner image changed: {actual!r} != {expected!r}')
+          os_version = subprocess.check_output(['sw_vers', '-productVersion'], text=True).strip()
+          if os_version != inputs['runner']['osVersion']:
+              raise SystemExit(f'macOS changed: {os_version!r}')
+          PY
+
+      - name: Build from public source
+        run: |
+          set -euo pipefail
+          bash scripts/build-unsigned.sh "$RUNNER_TEMP/unsigned"
+          ASSETS="$RUNNER_TEMP/release-assets"
+          mkdir -p "$ASSETS"
+          ditto -c -k --keepParent "$RUNNER_TEMP/unsigned/Toki.app" \
+            "$ASSETS/Toki-${GITHUB_REF_NAME}-unsigned.zip"
+          cp "$RUNNER_TEMP/unsigned/app-manifest.json" "$ASSETS/app-manifest.json"
+          cp "$RUNNER_TEMP/unsigned/toolchain-actual.json" "$ASSETS/toolchain-actual.json"
+          cp "$RUNNER_TEMP/unsigned/build-inputs.json" "$ASSETS/build-inputs.json"
+          (cd "$ASSETS" && shasum -a 256 Toki-*-unsigned.zip app-manifest.json toolchain-actual.json build-inputs.json > SHA256SUMS)
+
+      - name: Attest unsigned build
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/release-assets/Toki-*-unsigned.zip
+
+      - name: Include attestable bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" "$RUNNER_TEMP/release-assets/provenance.bundle.json"
+
+      - name: Transfer candidate to publisher
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-release-candidate
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  reproduce:
+    name: Rebuild independently on a second runner
+    needs: build
+    runs-on: macos-26
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact public tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download first build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: public-release-candidate
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Rebuild and compare every app entry
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin '+refs/tags/*:refs/tags/*'
+          python3 scripts/validate-public-source.py --tag "$RELEASE_TAG"
+          ASSETS="$RUNNER_TEMP/release-assets"
+          python3 - <<'PY'
+          import json, os, subprocess
+          inputs = json.load(open('build-inputs.json'))
+          if os.environ.get('ImageVersion') != inputs['runner']['imageVersion']:
+              raise SystemExit('runner image differs from pinned release input')
+          if subprocess.check_output(['sw_vers', '-productVersion'], text=True).strip() != inputs['runner']['osVersion']:
+              raise SystemExit('macOS differs from pinned release input')
+          PY
+          (cd "$ASSETS" && shasum -a 256 -c SHA256SUMS)
+          bash scripts/build-unsigned.sh "$RUNNER_TEMP/independent"
+          cmp "$ASSETS/app-manifest.json" "$RUNNER_TEMP/independent/app-manifest.json"
+          mkdir -p "$RUNNER_TEMP/first-build"
+          ditto -x -k "$ASSETS/Toki-${RELEASE_TAG}-unsigned.zip" "$RUNNER_TEMP/first-build"
+          python3 scripts/compare-app-payload.py \
+            "$RUNNER_TEMP/independent/Toki.app" "$RUNNER_TEMP/first-build/Toki.app"
+
+  publish:
+    name: Publish unsigned prerelease
+    needs: [build, reproduce]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - name: Checkout exact public tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: public-release-candidate
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Verify provenance and publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+          python3 scripts/audit-public-refs.py
+          python3 scripts/validate-public-source.py --tag "$RELEASE_TAG"
+          ASSETS="$RUNNER_TEMP/release-assets"
+          (cd "$ASSETS" && sha256sum --check SHA256SUMS)
+          ZIP="$ASSETS/Toki-${RELEASE_TAG}-unsigned.zip"
+          gh attestation verify "$ZIP" --repo "$GITHUB_REPOSITORY" \
+            --bundle "$ASSETS/provenance.bundle.json" \
+            --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build-release.yml"
+          SHA256="$(sha256sum "$ZIP" | cut -d' ' -f1)"
+          scripts/release-notes.sh "$RELEASE_TAG" > "$RUNNER_TEMP/release-body.md"
+          {
+            printf '\n\nSource commit: %s\n\n' "$GITHUB_SHA"
+            printf 'Unsigned app archive SHA-256: %s\n' "$SHA256"
+            printf 'The signed DMG will be added after private signing and independent verification.\n'
+          } >> "$RUNNER_TEMP/release-body.md"
+          gh release create "$RELEASE_TAG" --verify-tag --prerelease --latest=false \
+            --title "Toki ${RELEASE_TAG}" --notes-file "$RUNNER_TEMP/release-body.md" \
+            "$ASSETS"/*

@@ -1,0 +1,170 @@
+name: Verify and promote public release
+
+# Run only after the private signing workflow has added the signed candidate.
+# The old stable appcast stays live until both jobs finish their checks.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Annotated source release tag (vX.Y.Z)
+        required: true
+        type: string
+
+concurrency:
+  group: promote-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'TemMax/toki' && github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      source_sha: ${{ steps.check.outputs.source_sha }}
+      unsigned_sha256: ${{ steps.check.outputs.unsigned_sha256 }}
+      dmg_sha256: ${{ steps.check.outputs.dmg_sha256 }}
+    steps:
+      - name: Checkout exact public tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebuild and verify the downloaded candidate
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git fetch --force --no-tags origin \
+            '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+          python3 scripts/audit-public-refs.py
+          python3 scripts/validate-public-source.py --tag "$RELEASE_TAG"
+          python3 scripts/verify-package-lock.py
+          test "$(gh release view "$RELEASE_TAG" --json isPrerelease,isDraft \
+            --jq '[.isPrerelease,.isDraft]|@tsv')" = $'true\tfalse'
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" != "$RELEASE_TAG"
+          python3 - <<'PY'
+          import json, os, subprocess
+          inputs = json.load(open('build-inputs.json'))
+          if os.environ.get('ImageVersion') != inputs['runner']['imageVersion']:
+              raise SystemExit('runner image differs from pinned release input')
+          if subprocess.check_output(['sw_vers', '-productVersion'], text=True).strip() != inputs['runner']['osVersion']:
+              raise SystemExit('macOS differs from pinned release input')
+          PY
+          CANDIDATE="$RUNNER_TEMP/candidate"
+          mkdir "$CANDIDATE"
+          gh release download "$RELEASE_TAG" --dir "$CANDIDATE"
+          (cd "$CANDIDATE" && shasum -a 256 -c SHA256SUMS && shasum -a 256 -c DMG-SHA256SUMS)
+          python3 scripts/verify-candidate-manifest.py --assets "$CANDIDATE" --tag "$RELEASE_TAG"
+          ZIP="$CANDIDATE/Toki-${RELEASE_TAG}-unsigned.zip"
+          gh attestation verify "$ZIP" --repo "$GITHUB_REPOSITORY" \
+            --bundle "$CANDIDATE/provenance.bundle.json" \
+            --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$SOURCE_SHA" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build-release.yml"
+          bash scripts/build-unsigned.sh "$RUNNER_TEMP/independent"
+          python3 scripts/verify-release.py \
+            --dmg "$CANDIDATE/Toki-${RELEASE_TAG#v}.dmg" \
+            --appcast "$CANDIDATE/appcast.xml" \
+            --unsigned-app "$RUNNER_TEMP/independent/Toki.app" --source-root .
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "unsigned_sha256=$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+            echo "dmg_sha256=$(shasum -a 256 "$CANDIDATE/Toki-${RELEASE_TAG#v}.dmg" | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+
+  promote:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Promote only the verified candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ needs.verify.outputs.source_sha }}
+          UNSIGNED_SHA256: ${{ needs.verify.outputs.unsigned_sha256 }}
+          DMG_SHA256: ${{ needs.verify.outputs.dmg_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$RELEASE_TAG" --json isPrerelease,isDraft \
+            --jq '[.isPrerelease,.isDraft]|@tsv')" = $'true\tfalse'
+          PREVIOUS="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          test "$PREVIOUS" != "$RELEASE_TAG"
+          mkdir candidate
+          gh release download "$RELEASE_TAG" --dir candidate
+          (cd candidate && sha256sum --check SHA256SUMS && sha256sum --check DMG-SHA256SUMS)
+          test "$(sha256sum "candidate/Toki-${RELEASE_TAG}-unsigned.zip" | cut -d' ' -f1)" = "$UNSIGNED_SHA256"
+          test "$(sha256sum "candidate/Toki-${RELEASE_TAG#v}.dmg" | cut -d' ' -f1)" = "$DMG_SHA256"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path('candidate')
+          manifest = json.loads((root / 'release-manifest.json').read_text())
+          required = {
+              'tag': os.environ['RELEASE_TAG'],
+              'sourceSHA': os.environ['SOURCE_SHA'],
+              'unsignedSHA256': os.environ['UNSIGNED_SHA256'],
+              'signedDMGSHA256': os.environ['DMG_SHA256'],
+              'appcastSHA256': hashlib.sha256((root / 'appcast.xml').read_bytes()).hexdigest(),
+          }
+          for key, value in required.items():
+              if manifest.get(key) != value:
+                  raise SystemExit(f'candidate changed before promotion: {key}')
+          PY
+          gh release view "$RELEASE_TAG" --json body --jq .body > release-body.md
+          {
+            printf '\n\nSigned DMG SHA-256: %s\n' "$DMG_SHA256"
+            printf 'Independent signed-payload verification: passed in [Actions run](%s).\n' \
+              "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            printf '\nVerify this release from its public tag:\n\n'
+            # shellcheck disable=SC2016 # Markdown code fences are literal text.
+            printf '```sh\ngit clone https://github.com/%s.git\ncd toki\ngit checkout %s\nbash scripts/verify-tag.sh %s\n```\n' \
+              "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$RELEASE_TAG"
+          } >> release-body.md
+          python3 - <<'PY'
+          import json, os
+          report = {
+              'tag': os.environ['RELEASE_TAG'],
+              'sourceSHA': os.environ['SOURCE_SHA'],
+              'unsignedSHA256': os.environ['UNSIGNED_SHA256'],
+              'signedDMGSHA256': os.environ['DMG_SHA256'],
+              'verificationRun': os.environ['GITHUB_SERVER_URL'] + '/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID'],
+              'result': 'independent rebuild and signed payload comparison passed',
+          }
+          with open('verification-result.json', 'w') as file:
+              json.dump(report, file, indent=2, sort_keys=True)
+              file.write('\n')
+          PY
+          gh release upload "$RELEASE_TAG" verification-result.json
+          PROMOTED=0
+          rollback() {
+            if [ "$PROMOTED" = 1 ]; then
+              gh release edit "$RELEASE_TAG" --prerelease=true --latest=false || true
+              gh release edit "$PREVIOUS" --latest || true
+            fi
+          }
+          trap rollback ERR
+          gh release edit "$RELEASE_TAG" --prerelease=false --latest \
+            --notes-file release-body.md
+          PROMOTED=1
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = "$RELEASE_TAG"
+          curl -fsSL --retry 3 \
+            "https://github.com/TemMax/toki-releases/releases/latest/download/appcast.xml" \
+            -o old-feed.xml
+          curl -fsSL --retry 3 \
+            "https://github.com/TemMax/toki/releases/latest/download/appcast.xml" \
+            -o new-feed.xml
+          cmp old-feed.xml new-feed.xml
+          trap - ERR
+          echo "Promoted $RELEASE_TAG; test a live update from v1.12.1 before announcing or deleting old releases."

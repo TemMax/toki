@@ -1,0 +1,16 @@
+// Copy this file to `Local.xcconfig` (gitignored) to sign local builds with your
+// Apple Developer account.
+//
+// Find your Team ID (the value in parentheses is the cert name, the OU is the team):
+//   security find-identity -v -p codesigning
+//
+// Example identity:
+//   "Apple Development: Jane Doe (AB12CD34EF)"   <- Team ID is shown by:
+//   security find-certificate -c "Apple Development" -p | openssl x509 -noout -subject
+//   (look for the OU=XXXXXXXXXX field)
+
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+CODE_SIGN_STYLE = Manual
+// "Apple Development" for a pure dev cert, or "Developer ID Application" if you
+// sign local builds with your distribution identity.
+CODE_SIGN_IDENTITY = Developer ID Application

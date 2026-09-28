@@ -1,0 +1,24 @@
+{
+  "sparkle": {
+    "version": "2.10.0",
+    "revision": "eef1a539a373c1f1a320624b1130fc5de7b2e100",
+    "signingToolsArchive": "https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz",
+    "signingToolsSHA256": "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
+  },
+  "xcodegen": {
+    "version": "2.46.0",
+    "archive": "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip",
+    "sha256": "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
+  },
+  "xcode": {
+    "version": "26.6",
+    "build": "17F113",
+    "sdk": "26.5",
+    "swift": "6.3.3"
+  },
+  "runner": {
+    "label": "macos-26",
+    "imageVersion": "20260907.0351.1",
+    "osVersion": "26.6.2"
+  }
+}

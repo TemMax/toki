@@ -1,0 +1,24 @@
+.DS_Store
+.build/
+build/
+DerivedData/
+Local.xcconfig
+__pycache__/
+*.pyc
+docs/research/
+docs/superpowers/
+docs/performance/
+/AGENTS.md
+/CLAUDE.md
+**/AGENTS.md
+**/CLAUDE.md
+
+# XcodeGen generates the project; SwiftPM's lockfile is the one tracked exception.
+Toki.xcodeproj/*
+!Toki.xcodeproj/project.xcworkspace/
+Toki.xcodeproj/project.xcworkspace/*
+!Toki.xcodeproj/project.xcworkspace/xcshareddata/
+Toki.xcodeproj/project.xcworkspace/xcshareddata/*
+!Toki.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+Toki.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
+!Toki.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved

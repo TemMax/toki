@@ -1,0 +1,9 @@
+// Toki code-signing base config (checked in — safe, contains no personal data).
+//
+// To sign local builds with your Apple Developer account — so macOS remembers
+// "Always Allow" for the Claude Code Keychain item and stops re-prompting — copy
+// Local.xcconfig.example -> Local.xcconfig and set your Team ID.
+//
+// Without Local.xcconfig present, builds fall back to ad-hoc signing (and the
+// Keychain prompt returns on every rebuild).
+#include? "Local.xcconfig"
