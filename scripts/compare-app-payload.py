@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare unsigned and signed app payloads, excluding only code-signature bytes.
+"""Compare unsigned and signed app payloads, excluding signing and stapling data.
 
 This checks payload equality after a separate authenticity check. A standalone
 DMG verifier must validate Developer ID, notarization and Sparkle first.
@@ -129,7 +129,7 @@ def is_code_signature_directory(relative: str) -> bool:
     return False
 
 
-def inventory(root: Path) -> dict[str, tuple[str, int, str | bytes]]:
+def inventory(root: Path, *, allow_stapled_ticket: bool = False) -> dict[str, tuple[str, int, str | bytes]]:
     if not root.is_dir() or root.is_symlink():
         raise ValueError(f"app path is not a directory: {root}")
     items = {}
@@ -147,6 +147,13 @@ def inventory(root: Path) -> dict[str, tuple[str, int, str | bytes]]:
                     items[relative] = ("directory", mode, "")
                 visit(path)
             elif entry.is_file(follow_symlinks=False):
+                if relative == "Contents/CodeResources" and allow_stapled_ticket:
+                    # stapler adds this ticket outside _CodeSignature. The caller
+                    # must validate the ticket and Developer ID signature first.
+                    ticket = path.read_bytes()
+                    if len(ticket) < 16 or not ticket.startswith(b"s8ch"):
+                        raise ValueError("unexpected Contents/CodeResources payload")
+                    continue
                 if path.name == "CodeResources" and is_code_signature_directory(
                     path.parent.relative_to(root).as_posix()
                 ):
@@ -160,7 +167,8 @@ def inventory(root: Path) -> dict[str, tuple[str, int, str | bytes]]:
 
 
 def compare(unsigned_app: Path, signed_app: Path) -> None:
-    unsigned, signed = inventory(unsigned_app), inventory(signed_app)
+    unsigned = inventory(unsigned_app)
+    signed = inventory(signed_app, allow_stapled_ticket=True)
     if unsigned.keys() != signed.keys():
         only_unsigned = sorted(unsigned.keys() - signed.keys())
         only_signed = sorted(signed.keys() - unsigned.keys())
