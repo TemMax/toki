@@ -54,6 +54,27 @@ class CompareAppPayloadTests(unittest.TestCase):
         result = self.compare()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_stapled_notarization_ticket_is_accepted(self) -> None:
+        (self.signed / "Contents/CodeResources").write_bytes(
+            b"s8ch\x01\x00\x00\x00" + b"\x00" * 8
+        )
+        result = self.compare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_non_ticket_contents_code_resources_is_rejected(self) -> None:
+        (self.signed / "Contents/CodeResources").write_bytes(b"unexpected payload")
+        result = self.compare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CodeResources", result.stderr)
+
+    def test_unsigned_only_contents_code_resources_is_rejected(self) -> None:
+        (self.unsigned / "Contents/CodeResources").write_bytes(
+            b"s8ch\x01\x00\x00\x00" + b"\x00" * 8
+        )
+        result = self.compare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CodeResources", result.stderr)
+
     def test_resigned_code_change_is_rejected(self) -> None:
         (self.signed / "Contents/MacOS/Toki").write_bytes(macho(b"altered code", b"new-signature-longer"))
         result = self.compare()
