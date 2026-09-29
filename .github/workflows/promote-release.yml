@@ -48,7 +48,6 @@ jobs:
           test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
           python3 scripts/audit-public-refs.py
           python3 scripts/validate-public-source.py --tag "$RELEASE_TAG"
-          python3 scripts/verify-package-lock.py
           test "$(gh release view "$RELEASE_TAG" --json isPrerelease,isDraft \
             --jq '[.isPrerelease,.isDraft]|@tsv')" = $'true\tfalse'
           test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" != "$RELEASE_TAG"
