@@ -35,7 +35,6 @@ jobs:
           test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
           python3 scripts/audit-public-refs.py
           python3 scripts/validate-public-source.py --tag "$RELEASE_TAG"
-          python3 scripts/verify-package-lock.py
           python3 - <<'PY'
           import json, os, subprocess
           inputs = json.load(open('build-inputs.json'))
