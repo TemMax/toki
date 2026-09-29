@@ -84,6 +84,9 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # This job has no checkout; tell gh which repository owns the release.
+      GH_REPO: ${{ github.repository }}
     permissions:
       contents: write
     steps:
