@@ -99,7 +99,6 @@ struct TokiApp: App {
             // scene only publishes it into the environment.
             .environmentObject(container.updater)
             // Settings shows whether Claude Code's status line is feeding live usage.
-            .environment(container.statuslineUsage)
         }
         .defaultSize(width: 860, height: 540)
         // Hide the title bar so the window is one continuous glass surface; the

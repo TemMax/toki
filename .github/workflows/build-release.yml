@@ -166,7 +166,6 @@ jobs:
           {
             printf '\n\nSource commit: %s\n\n' "$GITHUB_SHA"
             printf 'Unsigned app archive SHA-256: %s\n' "$SHA256"
-            printf 'The signed DMG will be added after private signing and independent verification.\n'
           } >> "$RUNNER_TEMP/release-body.md"
           gh release create "$RELEASE_TAG" --verify-tag --prerelease --latest=false \
             --title "Toki ${RELEASE_TAG}" --notes-file "$RUNNER_TEMP/release-body.md" \
