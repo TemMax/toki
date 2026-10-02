@@ -44,12 +44,46 @@ final class LiveLimits {
     var codexState: State = .loading
     private(set) var allowsRestoredCodexResets = false
 
+    private struct LivePresentation {
+        let claudeLimits: UsageLimits?
+        let claudeState: State
+        let claudeFailure: LiveUsageFeed.Failure?
+        var codexLimits: UsageLimits?
+        var codexState: State
+    }
+
+    @ObservationIgnored private var suspendedPresentation: LivePresentation?
+    @ObservationIgnored private var codexIdentityGeneration: UInt64 = 0
+
     /// No-ops the lifecycle for the demo/snapshot harness.
     var runMode: RunMode = .live {
         didSet {
+            guard oldValue != runMode else { return }
+            if oldValue.isLive {
+                suspendedPresentation = LivePresentation(
+                    claudeLimits: claudeFeed.limits,
+                    claudeState: claudeFeed.state,
+                    claudeFailure: claudeFeed.failure,
+                    codexLimits: codexLimits,
+                    codexState: codexState
+                )
+            }
             claudeFeed.invalidate()
+            codexAccountGeneration &+= 1
             allowsRestoredClaudeResets = false
             allowsRestoredCodexResets = false
+            if runMode.isLive, let presentation = suspendedPresentation {
+                claudeFeed.restorePresentation(
+                    limits: presentation.claudeLimits,
+                    state: presentation.claudeState,
+                    failure: presentation.claudeFailure
+                )
+                allowsRestoredClaudeResets = presentation.claudeLimits != nil
+                codexLimits = presentation.codexLimits
+                codexState = codexLimits.map { .stale($0.fetchedAt) } ?? presentation.codexState
+                allowsRestoredCodexResets = codexLimits != nil
+                suspendedPresentation = nil
+            }
         }
     }
 
@@ -164,22 +198,34 @@ final class LiveLimits {
     }
 
     func codexAccountDidChange() {
+        codexIdentityGeneration &+= 1
+        let identityGeneration = codexIdentityGeneration
         codexAccountGeneration &+= 1
-        let generation = codexAccountGeneration
         codexLimits = nil
         codexState = .loading
         allowsRestoredCodexResets = false
+        if suspendedPresentation != nil {
+            suspendedPresentation?.codexLimits = nil
+            suspendedPresentation?.codexState = .loading
+        }
         Task { [weak self] in
             guard let self else { return }
             await self.codexLimitsService.accountDidChange()
-            guard self.codexAccountGeneration == generation else { return }
-            if let previous = await self.codexLimitsService.lastSnapshotForCurrentAccount() {
-                guard self.codexAccountGeneration == generation else { return }
+            guard self.codexIdentityGeneration == identityGeneration else { return }
+            let previous = await self.codexLimitsService.lastSnapshotForCurrentAccount()
+            guard self.codexIdentityGeneration == identityGeneration else { return }
+            if let previous {
                 self.codexLimits = previous
                 self.codexState = .stale(previous.fetchedAt)
                 self.allowsRestoredCodexResets = true
+                if self.suspendedPresentation != nil {
+                    self.suspendedPresentation?.codexLimits = previous
+                    self.suspendedPresentation?.codexState = .stale(previous.fetchedAt)
+                }
             }
+            guard self.codexIdentityGeneration == identityGeneration else { return }
             await self.fetchCodexOnce()
+            guard self.codexIdentityGeneration == identityGeneration else { return }
         }
     }
 
@@ -206,7 +252,10 @@ final class LiveLimits {
 
     private func fetchOnce(forceFreshCredential: Bool = false) async {
         guard runMode.isLive, limitsFetchEnabled else { return }
-        await claudeFeed.refresh(forceCredentialRefresh: forceFreshCredential)
+        let startingResultRevision = claudeFeed.refreshResultRevision
+        let refreshIsCurrent = await claudeFeed.refresh(forceCredentialRefresh: forceFreshCredential)
+        guard runMode.isLive, refreshIsCurrent else { return }
+        guard claudeFeed.refreshResultRevision != startingResultRevision else { return }
         if claudeFeed.state == .ok || (claudeFeed.failure != nil && claudeFeed.failure != .rateLimited) {
             allowsRestoredClaudeResets = false
         }
@@ -214,9 +263,10 @@ final class LiveLimits {
 
     /// Folds in the usage Claude Code just handed its status line. The feed decides whether
     /// the sample belongs to the snapshot on screen; a sample it refuses changes nothing.
-    func ingestStatusline(_ sample: StatuslineRateLimits) {
-        guard runMode.isLive else { return }
-        claudeFeed.ingest(sample)
+    @discardableResult
+    func ingestStatusline(_ sample: StatuslineRateLimits) -> Bool {
+        guard runMode.isLive else { return false }
+        return claudeFeed.ingest(sample)
     }
 
     /// Called synchronously when identity changes, before any asynchronous reload.

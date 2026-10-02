@@ -64,8 +64,8 @@ targets:
         ARCHS: arm64
         CODE_SIGN_ENTITLEMENTS: App/Toki.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        CURRENT_PROJECT_VERSION: 47
-        MARKETING_VERSION: 1.13.3
+        CURRENT_PROJECT_VERSION: 48
+        MARKETING_VERSION: 1.13.4
       configs:
         # Debug: hardened runtime OFF so the Xcode debugger can attach to a
         # Developer ID-signed local build.

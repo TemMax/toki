@@ -13,21 +13,18 @@ private let log = TokiLog.logger("statusline")
 /// moment Claude Code replies — no Keychain read, no rate-limited request. The OAuth poll
 /// stays as the source for everything else and for when Claude Code is idle.
 ///
-/// On by default, under `enabledKey`, which Settings writes; flipping it installs or removes
-/// the tap immediately. The tap is re-applied whenever `settings.json` changes and on a
-/// periodic check besides, so a status line the user replaces — by hand, from another tool,
-/// through a synced dotfile — is wrapped again rather than silently left untapped.
+/// Always installed at startup and re-applied whenever `settings.json` changes and on a
+/// periodic check, so a status line the user replaces — by hand, from another tool, through
+/// a synced dotfile — is wrapped again rather than silently left untapped.
 @Observable
 @MainActor
 final class StatuslineUsageDriver {
-    static let enabledKey = "toki.statuslineTap.enabled"
     /// How often the settings file is re-checked on top of the file watcher.
     static let checkInterval: Duration = .seconds(60)
 
     enum Status: Equatable {
         /// Not checked yet.
         case unknown
-        case off
         /// The user's own status line runs through the tap.
         case wrappingUserCommand
         /// Toki's silent status line is installed.
@@ -38,27 +35,19 @@ final class StatuslineUsageDriver {
         case failed
     }
 
-    static var isEnabled: Bool {
-        UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true
-    }
-
     private(set) var status: Status = .unknown
     /// When Claude Code last handed Toki usage through the status line.
     private(set) var lastSampleAt: Date?
 
-    var backupsURL: URL { tap.backupsURL }
-
     @ObservationIgnored private let tap: StatuslineTap
     @ObservationIgnored private let limits: LiveLimits
-    /// Installs and removes in the order they were asked for; each is a read-modify-write of
-    /// the user's settings file.
+    /// Serializes read-modify-write operations on the user's settings file.
     @ObservationIgnored private let tapQueue = DispatchQueue(label: "dev.komar.toki.statusline-tap")
     @ObservationIgnored private var sampleWatcher: FileWatcher?
     @ObservationIgnored private var settingsWatcher: FileWatcher?
-    @ObservationIgnored private var defaultsObserver: NSObjectProtocol?
     @ObservationIgnored private var periodicCheck: Task<Void, Never>?
-    @ObservationIgnored private var appliedEnabled: Bool?
     @ObservationIgnored private var lastSampleModified: Date?
+    @ObservationIgnored private var generation: UInt64 = 0
 
     init(tap: StatuslineTap = .live, limits: LiveLimits) {
         self.tap = tap
@@ -67,7 +56,7 @@ final class StatuslineUsageDriver {
 
     func start() {
         guard sampleWatcher == nil else { return }
-        applySettingIfChanged()
+        generation &+= 1
 
         let sampleWatcher = FileWatcher(url: tap.sampleURL, debounce: 0.05) { [weak self] in
             Task { @MainActor in await self?.readSample() }
@@ -80,6 +69,7 @@ final class StatuslineUsageDriver {
         }
         self.settingsWatcher = settingsWatcher
         settingsWatcher.start()
+        reconcile()
 
         // The watcher follows one inode; a settings file swapped behind a symlink, or an edit
         // made while a watch was being re-armed, would otherwise go unnoticed until relaunch.
@@ -95,69 +85,54 @@ final class StatuslineUsageDriver {
             }
         }
 
-        defaultsObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.applySettingIfChanged() }
-        }
-
         // A sample written while Toki was not running may still be newer than the cache.
         Task { await readSample() }
     }
 
     func stop() {
+        generation &+= 1
         sampleWatcher?.stop()
         sampleWatcher = nil
         settingsWatcher?.stop()
         settingsWatcher = nil
         periodicCheck?.cancel()
         periodicCheck = nil
-        if let defaultsObserver { NotificationCenter.default.removeObserver(defaultsObserver) }
-        defaultsObserver = nil
+        lastSampleModified = nil
+        lastSampleAt = nil
     }
 
-    private func applySettingIfChanged() {
-        let enabled = Self.isEnabled
-        guard enabled != appliedEnabled else { return }
-        appliedEnabled = enabled
-        log.info("live usage from the status line enabled=\(enabled)")
-        reconcile()
-    }
-
-    /// Brings `settings.json` in line with the setting. Both directions are idempotent, so the
-    /// settings watcher firing on Toki's own write settles after one no-op pass.
+    /// Installation is idempotent, so the settings watcher firing on Toki's own write
+    /// settles after one no-op pass.
     private func reconcile() {
-        let enabled = appliedEnabled ?? Self.isEnabled
+        guard sampleWatcher != nil else { return }
+        let generation = self.generation
         let tap = self.tap
         tapQueue.async { [weak self] in
-            let status = Self.apply(enabled: enabled, to: tap)
-            Task { @MainActor in self?.status = status }
+            let status = Self.install(tap)
+            Task { @MainActor in
+                guard let self, self.generation == generation else { return }
+                self.status = status
+            }
         }
     }
 
-    nonisolated private static func apply(enabled: Bool, to tap: StatuslineTap) -> Status {
+    nonisolated private static func install(_ tap: StatuslineTap) -> Status {
         do {
-            if enabled {
-                try tap.install()
-            } else {
-                try tap.uninstall()
-                return .off
-            }
+            try tap.install()
             switch try tap.state() {
             case let .tapped(original): return original.isEmpty ? .silentStatusLine : .wrappingUserCommand
             case .unsupported: return .unsupported
             case .untapped, .noStatusLine: return .failed
             }
-        } catch where enabled {
-            log.error("status line tap could not be installed \(error: error)")
-            return .failed
         } catch {
-            log.error("status line tap could not be removed \(error: error)")
+            log.error("status line tap could not be installed \(error: error)")
             return .failed
         }
     }
 
     private func readSample() async {
+        guard sampleWatcher != nil else { return }
+        let generation = self.generation
         let url = tap.sampleURL
         let read = await Task.detached { () -> (Data, Date)? in
             // An absent sample is the normal state until Claude Code next replies.
@@ -171,10 +146,12 @@ final class StatuslineUsageDriver {
                 return nil
             }
         }.value
-        guard let (data, modified) = read, modified != lastSampleModified else { return }
+        guard sampleWatcher != nil,
+              self.generation == generation,
+              let (data, modified) = read, modified != lastSampleModified else { return }
         lastSampleModified = modified
-        guard let sample = StatuslineRateLimits.parse(data, observedAt: modified) else { return }
+        guard let sample = StatuslineRateLimits.parse(data, observedAt: modified),
+              limits.ingestStatusline(sample) else { return }
         lastSampleAt = modified
-        limits.ingestStatusline(sample)
     }
 }

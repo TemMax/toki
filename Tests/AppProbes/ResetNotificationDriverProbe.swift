@@ -98,6 +98,11 @@ final class ResetCatalog: URLProtocol, @unchecked Sendable {
         driver.start()
         try await settle()
         precondition(defaults.data(forKey: "toki.resetNotifications.history.debug") != nil)
+        precondition(live.codexState == .stale(live.codexLimits!.fetchedAt),
+                     "returning from fixtures must not treat a restored snapshot as a live response")
+        precondition(SwapNotifier.authorizations == 0)
+        live.codexState = .ok
+        try await settle()
         live.codexLimits = snapshot(2)
         try await settle()
         precondition(SwapNotifier.authorizations == 0, "muted events must never prompt")

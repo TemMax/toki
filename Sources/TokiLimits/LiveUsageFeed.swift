@@ -24,6 +24,7 @@ public final class LiveUsageFeed {
     public var limits: UsageLimits?
     public var state: State = .loading
     public private(set) var failure: Failure?
+    public private(set) var refreshResultRevision: UInt64 = 0
     private let fetch: @Sendable (Bool) async throws -> UsageLimits
     private let maximumAge: TimeInterval
     private var generation: UInt64 = 0
@@ -54,22 +55,28 @@ public final class LiveUsageFeed {
         log.info("live usage invalidated generation=\(Int(generation))")
     }
 
-    public func refresh(forceCredentialRefresh: Bool = false) async {
+    @discardableResult
+    public func refresh(forceCredentialRefresh: Bool = false) async -> Bool {
         if let request {
             if forceCredentialRefresh && !request.forced {
                 invalidate()
             } else {
+                let joinedGeneration = generation
                 await request.task.value
-                return
+                return generation == joinedGeneration
             }
         }
         let id = UUID()
         let startedGeneration = generation
         let fetch = self.fetch
         let task = Task { [weak self] in
+            defer {
+                if let self, self.request?.id == id { self.request = nil }
+            }
             do {
                 let result = try await fetch(forceCredentialRefresh)
                 guard let self, self.generation == startedGeneration, !Task.isCancelled else { return }
+                self.refreshResultRevision &+= 1
                 self.publish(result, generation: startedGeneration)
             } catch is UsageRefreshDeferred {
                 // Another surface or the background loop already owns this account's
@@ -78,12 +85,13 @@ public final class LiveUsageFeed {
             } catch {
                 // no-log: fail(_:) logs current-request failures; superseded replies are discarded.
                 guard let self, self.generation == startedGeneration, !Task.isCancelled else { return }
+                self.refreshResultRevision &+= 1
                 self.fail(error)
             }
         }
         request = (id, forceCredentialRefresh, task)
         await task.value
-        if request?.id == id { request = nil }
+        return generation == startedGeneration
     }
 
     private func publish(_ result: UsageLimits, generation: UInt64) {
@@ -127,13 +135,26 @@ public final class LiveUsageFeed {
         log.debug("live usage restored from cache generation=\(Int(generation))")
     }
 
+    public func restorePresentation(limits: UsageLimits?, state: State, failure: Failure?) {
+        invalidate()
+        self.limits = limits
+        switch state {
+        case .needsAccess, .notLoggedIn:
+            self.state = state
+        default:
+            self.state = limits.map { .stale($0.fetchedAt) } ?? state
+        }
+        self.failure = failure
+    }
+
     /// Folds in the usage Claude Code gave its status line. Only the snapshot on screen can
     /// accept it — it must belong to an account and be the same week's (see
     /// `StatuslineRateLimits.merged(into:)`) — so after an account change nothing is taken
     /// until that account's first poll lands. Returns whether the sample was applied.
     @discardableResult
     public func ingest(_ sample: StatuslineRateLimits) -> Bool {
-        guard let current = limits, current.account.map({ !$0.accountUuid.isEmpty }) == true,
+        guard sample.observedAt <= Date(),
+              let current = limits, current.account.map({ !$0.accountUuid.isEmpty }) == true,
               let merged = sample.merged(into: current) else { return false }
         if !showCurrent(merged) {
             // Newer than what was shown, but past the freshness ceiling: keep the numbers,

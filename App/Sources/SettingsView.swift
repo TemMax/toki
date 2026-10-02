@@ -73,10 +73,7 @@ struct SettingsSections: View {
     /// absent or corrupt. Read by `AutoSwapDriver` (via `ServiceContainer`) under the
     /// same key.
     @AppStorage("toki.autoSwapSettings") private var autoSwapSettingsJSON = ""
-    /// Read by `StatuslineUsageDriver`, which installs or removes the tap as it flips.
-    @AppStorage(StatuslineUsageDriver.enabledKey) private var isStatuslineUsageEnabled = true
     /// Absent in the snapshot harness and previews, which show the section's generic copy.
-    @Environment(StatuslineUsageDriver.self) private var statuslineUsage: StatuslineUsageDriver?
     /// Codex has its own switch, thresholds and cooldown. It never inherits Claude's choice.
     @AppStorage("toki.codexAutoSwapSettings") private var codexAutoSwapSettingsJSON = ""
 
@@ -193,8 +190,6 @@ struct SettingsSections: View {
         HStack(alignment: .top, spacing: Spacing.md) {
             VStack(alignment: .leading, spacing: Spacing.lg) {
                 if providerAvailability.claudeCode {
-                    liveUsageSection
-                        .staggerIn(index: 0, isVisible: isVisible)
                     autoSwapSection(provider: .claudeCode)
                         .staggerIn(index: 0, isVisible: isVisible)
                 }
@@ -1138,71 +1133,6 @@ struct SettingsSections: View {
                 .disabled(!isEnabled)
         }
         .opacity(isEnabled ? 1 : 0.5)
-    }
-
-    // MARK: Live Usage
-
-    private var liveUsageSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.xs) {
-            SectionHeader("LIVE USAGE")
-
-            VStack(alignment: .leading, spacing: Spacing.sm) {
-                HStack(alignment: .top, spacing: Spacing.md) {
-                    sourceRow(
-                        icon: "bolt.fill",
-                        title: "Instant updates from Claude Code",
-                        detail: liveUsageDetail
-                    )
-                    Spacer(minLength: 0)
-                    Toggle("Instant updates from Claude Code", isOn: $isStatuslineUsageEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(Palette.accent)
-                        .accessibilityIdentifier("settings.liveUsage.toggle")
-                }
-
-                if isStatuslineUsageEnabled, let lastSampleAt = statuslineUsage?.lastSampleAt {
-                    TimelineView(.periodic(from: .now, by: 30)) { _ in
-                        Text("Last update from Claude Code \(lastSampleAt, format: .relative(presentation: .named))")
-                            .textStyle(.detail)
-                            .foregroundStyle(Palette.textSecondary)
-                    }
-                    .padding(.leading, 30 + Spacing.sm)
-                }
-
-                if let backups = statuslineUsage?.backupsURL,
-                   FileManager.default.fileExists(atPath: backups.path) {
-                    Button("Show Settings Backups") {
-                        NSWorkspace.shared.activateFileViewerSelecting([backups])
-                    }
-                    .buttonStyle(.link)
-                    .textStyle(.detail)
-                    .padding(.leading, 30 + Spacing.sm)
-                    .help("Copies of ~/.claude/settings.json saved before each change Toki made")
-                }
-            }
-            .padding(Spacing.md)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .panelCard()
-        }
-    }
-
-    private var liveUsageDetail: String {
-        guard isStatuslineUsageEnabled else {
-            return "Off. Usage updates every 90 seconds instead."
-        }
-        switch statuslineUsage?.status ?? .unknown {
-        case .wrappingUserCommand:
-            return "After every reply, Claude Code passes your 5-hour and 7-day usage to your status line. Toki reads it on the way, and your status line looks the same."
-        case .silentStatusLine:
-            return "Toki added a status line that shows nothing, so Claude Code passes your 5-hour and 7-day usage to Toki after every reply. While any status line is set, Claude Code hides its \u{201C}? for shortcuts\u{201D}, \u{201C}esc to interrupt\u{201D} and \u{201C}hold space to speak\u{201D} hints."
-        case .unsupported:
-            return "Your Claude Code status line isn\u{2019}t a command, so Toki can\u{2019}t read from it. Usage updates every 90 seconds instead."
-        case .failed:
-            return "Toki couldn\u{2019}t update ~/.claude/settings.json. Usage updates every 90 seconds instead."
-        case .unknown, .off:
-            return "After every reply, Claude Code passes your 5-hour and 7-day usage to its status line. Toki reads it there, so the gauges move as you work."
-        }
     }
 
     // MARK: Data Sources
