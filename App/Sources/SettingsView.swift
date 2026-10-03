@@ -38,7 +38,7 @@ struct SettingsSections: View {
     /// Extra top padding for callers that render this section OUTSIDE the dashboard — the
     /// snapshot harness and the debug control channel, which give it a plain margin instead.
     /// As a dashboard tab it is 0: clearing the floating toolbar is `DashboardView`'s job
-    /// now, done once for all four tabs (`Measure.dashboardContentTop`).
+    /// now, done once for all five tabs (`Measure.dashboardContentTop`).
     var topInset: CGFloat = 0
 
     /// The single owner of the menu-bar indicator configuration and the live limits it

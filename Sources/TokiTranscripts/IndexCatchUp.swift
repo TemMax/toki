@@ -42,6 +42,11 @@ struct ScanJob: Sendable {
     let device: UInt64
     let modified: TimeInterval
     let lastEventId: UInt64
+    /// The Claude start anchor in effect at `startOffset` (nil when starting at 0).
+    let lastInputMs: Int64?
+    /// The Claude request open at `startOffset` and its start (nil when starting at 0).
+    let openRequestId: String?
+    let openRequestStartMs: Int64?
 
     /// Decides whether `path` needs reading at all, and from where, against its persisted
     /// state. `nil` means skip: unchanged since the last pass, or not a regular file.
@@ -87,12 +92,20 @@ struct ScanJob: Sendable {
             inode: inode,
             device: device,
             modified: modified,
-            lastEventId: prior?.lastEventId ?? 0
+            lastEventId: prior?.lastEventId ?? 0,
+            lastInputMs: start > 0 ? prior?.lastInputMs : nil,
+            openRequestId: start > 0 ? prior?.openRequestId : nil,
+            openRequestStartMs: start > 0 ? prior?.openRequestStartMs : nil
         )
     }
 
     /// The position to persist once the scan that started at `startOffset` ended at `result`.
-    func state(after result: LineScanner.Result) -> FileIndexState {
+    func state(
+        after result: LineScanner.Result,
+        lastInputMs: Int64? = nil,
+        openRequestId: String? = nil,
+        openRequestStartMs: Int64? = nil
+    ) -> FileIndexState {
         FileIndexState(
             path: path,
             lastByteOffset: result.consumedOffset,
@@ -100,7 +113,10 @@ struct ScanJob: Sendable {
             lastKnownSize: max(size, result.consumedOffset),
             inode: inode,
             device: device,
-            lastEventId: lastEventId
+            lastEventId: lastEventId,
+            lastInputMs: lastInputMs,
+            openRequestId: openRequestId,
+            openRequestStartMs: openRequestStartMs
         )
     }
 }

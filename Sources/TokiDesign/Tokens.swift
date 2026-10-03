@@ -58,4 +58,20 @@ public enum Tokens {
     public static let ok = ColorToken(light: 0x2F6B52, dark: 0x6FCBA2)
     public static let warn = ColorToken(light: 0x7D5A0C, dark: 0xE0B44E)
     public static let critical = ColorToken(light: 0x9E2B2B, dark: 0xE87A72)
+
+    // MARK: - Chart series
+
+    /// Categorical colours for chart series — FILL/LINE ONLY, never text. Slot 1 is the copper
+    /// accent (stepped down in dark so it sits in the dark lightness band). Validated with the
+    /// dataviz palette validator, all pairs, against `card`:
+    ///   light: band/chroma/normal-vision PASS; worst CVD ΔE 7.0 (deutan, slots 3↔1) — WARN
+    ///   dark:  band/chroma/normal-vision PASS; worst CVD ΔE 6.3 (protan, slots 3↔1) — WARN
+    /// A WARN is legal only with secondary encoding, which every chart using these must carry:
+    /// a legend, end-of-line labels and the table beside the chart.
+    public static let chartSeries: [ColorToken] = [
+        ColorToken(light: 0x9C4D26, dark: 0xC47240),
+        ColorToken(light: 0x2A6FD6, dark: 0x4C82D8),
+        ColorToken(light: 0x1E8C5A, dark: 0x1F9A62),
+        ColorToken(light: 0xC04A9A, dark: 0xB95CB0),
+    ]
 }

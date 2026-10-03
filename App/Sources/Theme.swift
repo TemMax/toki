@@ -38,21 +38,40 @@ enum Measure {
     /// the thing it previews — stretched to the sheet width it stops resembling it.
     static let notificationBanner: CGFloat = 360
 
-    /// Height of the dashboard's floating toolbar — the title row, the account/range row and
+    /// Height of the dashboard's floating toolbar — the title row, the account row and
     /// the tab strip, plus the padding around them. It is drawn OVER the tabs rather than
     /// above them (content scrolls under its progressive blur), so it reserves no space of
     /// its own and every tab has to be told how tall it is.
     static let dashboardToolbar: CGFloat = 118
 
-    /// Where every dashboard tab's scroll content starts: clear of the toolbar above, plus
-    /// one small step of air.
+    /// Where every dashboard tab's content starts, measured from the top of the window: clear
+    /// of the toolbar above, plus one step of air.
     ///
     /// THE single owner of that distance. It used to be spelled `toolbarHeight + Spacing.sm`
-    /// at each of the four tab call sites, which is four numbers that only happened to agree
+    /// at each of the five tab call sites, which is five numbers that only happened to agree
     /// — the same defect the page width had before `Measure` existed. `DashboardView` now
     /// applies this once, to the whole content area, so no tab can start at a different
     /// height from its neighbours.
-    static let dashboardContentTop: CGFloat = dashboardToolbar + Spacing.sm
+    ///
+    /// The toolbar overlay ignores the top safe area, so its rows are laid out from the very
+    /// top of the window. `DashboardView.contentArea` ignores it too, so this value is measured
+    /// from that same origin; before that, the hidden title bar's 32 pt safe area was added on
+    /// top and the gap under the last toolbar row was 16 pt (this constant minus the rows) plus
+    /// 32 pt of inset. Now it is exactly `Spacing.lg` + the 4 pt the toolbar's own bottom
+    /// padding reaches past its last row — 24 pt, half of what it was.
+    static let dashboardContentTop: CGFloat = dashboardToolbar + Spacing.lg
+
+    /// The Usage tab's range picker, on its own row under the tab strip (30 pt + one step).
+    /// Only Usage has it, so only Usage's toolbar — and content top — is taller.
+    static let dashboardRangeRow: CGFloat = 30 + Spacing.sm
+
+    static func dashboardToolbar(showsRangeRow: Bool) -> CGFloat {
+        dashboardToolbar + (showsRangeRow ? dashboardRangeRow : 0)
+    }
+
+    static func dashboardContentTop(showsRangeRow: Bool) -> CGFloat {
+        dashboardToolbar(showsRangeRow: showsRangeRow) + Spacing.lg
+    }
 }
 
 /// Hairline border widths.

@@ -105,6 +105,15 @@ public struct TranscriptRecord: Sendable {
     public let isSidechain: Bool
     /// Request options that change its price but not its token counts.
     public let billing: BillingModifiers
+    /// End of the request minus its start, in ms — the time the model took to produce
+    /// `usage.output` (queueing and time to first token included; see the generation speed
+    /// spec). `nil` when the transcript did not show where the request started.
+    public let generationMs: Int?
+    /// Reasoning effort the request ran at (`low`…`max`), as the transcript spelled it.
+    public let effort: String?
+    /// Fast mode: Claude `speed: "fast"`, Codex `service_tier: "priority"`. Deliberately not a
+    /// `BillingModifiers` flag — Codex priority is not priced.
+    public let isFast: Bool
 
     /// Human-readable project name derived from the last path component of `cwd`.
     public var projectName: String {
@@ -119,7 +128,10 @@ public struct TranscriptRecord: Sendable {
         timestamp: Date,
         usage: TokenUsage,
         isSidechain: Bool,
-        billing: BillingModifiers = []
+        billing: BillingModifiers = [],
+        generationMs: Int? = nil,
+        effort: String? = nil,
+        isFast: Bool = false
     ) {
         self.requestId = requestId
         self.sessionId = sessionId
@@ -129,6 +141,18 @@ public struct TranscriptRecord: Sendable {
         self.usage = usage
         self.isSidechain = isSidechain
         self.billing = billing
+        self.generationMs = generationMs
+        self.effort = effort
+        self.isFast = isFast
+    }
+
+    /// This record with `generationMs` replaced — the scan learns the duration after parsing.
+    public func withGenerationMs(_ ms: Int?) -> TranscriptRecord {
+        TranscriptRecord(
+            requestId: requestId, sessionId: sessionId, cwd: cwd, model: model,
+            timestamp: timestamp, usage: usage, isSidechain: isSidechain, billing: billing,
+            generationMs: ms, effort: effort, isFast: isFast
+        )
     }
 }
 

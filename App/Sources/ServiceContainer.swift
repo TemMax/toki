@@ -95,6 +95,8 @@ final class ServiceContainer {
     let accountsVM: AccountsViewModel
     let codexAccountsVM: CodexAccountsViewModel
     let statisticsVM: StatisticsViewModel
+    /// The one owner of the generation speed report; the Speed view observes it.
+    let speedVM: SpeedViewModel
 
     /// Whether every surface shows real data or a fixture scenario. Assigning through
     /// `apply(_:)` propagates to each view model and, for a fixture, injects that
@@ -304,6 +306,10 @@ final class ServiceContainer {
         self.dashboardVM.onInitialIndexFinished = { [weak statisticsVM = self.statisticsVM] in
             statisticsVM?.indexDidCatchUp()
         }
+        self.speedVM = SpeedViewModel(samples: indexer)
+        self.dashboardVM.onIndexContentChanged = { [weak speedVM = self.speedVM] in
+            speedVM?.indexDidChange()
+        }
 
         // Codex may seed its independent cache. Claude waits for a live, account-bound
         // response after credential access has been checked.
@@ -434,6 +440,7 @@ final class ServiceContainer {
         menuBarVM.runMode = mode
         dashboardVM.runMode = mode
         statisticsVM.runMode = mode
+        speedVM.runMode = mode
         environmentVM.runMode = mode
         instancesVM.runMode = mode
         accountsVM.runMode = mode
@@ -463,6 +470,7 @@ final class ServiceContainer {
         codexServiceStatus.status = bundle.serviceStatus
         dashboardVM.summary = bundle.summary
         statisticsVM.history = bundle.stats
+        speedVM.inject(bundle.speed)
         signedIn.identity = bundle.identity
         accountsVM.accounts = bundle.accounts
         accountsVM.quarantined = bundle.quarantine
@@ -492,6 +500,7 @@ final class ServiceContainer {
         if providerAvailability.hasAnyProvider {
             dashboardVM.load()
             statisticsVM.load()
+            speedVM.indexDidChange()
             environmentVM.load()
             instancesVM.load()
         }

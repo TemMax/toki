@@ -55,6 +55,7 @@ macOS 14 or later · Apple Silicon
 - **Fresh Claude usage while you work.** An optional Claude Code status-line integration keeps the main usage windows current after replies.
 - **Highly customizable menu bar.** Choose which limits appear, reorder them, and show each as a bar, number or both with optional labels.
 - **Usage analytics.** Explore tokens, API calls, projects, models and estimated API-equivalent spend from local transcripts. Estimates are not your provider's bill.
+- **Generation speed.** Compare output tokens per second by model, effort and Fast mode, and see how each has changed over time.
 - **Activity history.** See a year of daily activity, streaks, busiest days and the hours when you work.
 - **Multiple accounts.** Save and switch Claude Code and Codex accounts independently, with each account's limits kept separate.
 - **Optional AutoSwap.** Set a threshold and cooldown for each provider to move to another saved account as a limit approaches.

@@ -139,6 +139,22 @@ struct PlaneSeparationTests {
     }
 }
 
+/// Chart series are graphics, not text: WCAG 1.4.11 asks 3:1 against the card they are
+/// drawn on. Their categorical separation (lightness band, chroma floor, CVD ΔE) was checked
+/// with the dataviz palette validator — see the doc comment on `Tokens.chartSeries`.
+@Suite("Chart series tokens clear 3:1 on the card, light and dark")
+struct ChartSeriesContrastTests {
+    @Test("four slots")
+    func fourSlots() { #expect(Tokens.chartSeries.count == 4) }
+
+    @Test("each clears 3:1", arguments: Array(Tokens.chartSeries.indices))
+    func clears(slot: Int) {
+        let token = Tokens.chartSeries[slot]
+        #expect(Contrast.ratio(token.light, Tokens.card.light) >= 3, "slot \(slot + 1) light")
+        #expect(Contrast.ratio(token.dark, Tokens.card.dark) >= 3, "slot \(slot + 1) dark")
+    }
+}
+
 @Suite("Formula sanity")
 struct FormulaSanityTests {
     @Test("white on black is 21.0")

@@ -76,7 +76,7 @@ struct TokiApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        // Full dashboard window — Usage / Statistics / Machine / Accounts / Settings tabs.
+        // Full dashboard window — Usage / Speed / Machine / Accounts / Settings tabs.
         // Settings is a tab here now; there is no standalone Settings window.
         Window("Toki Dashboard", id: "dashboard") {
             DashboardView(
@@ -90,6 +90,7 @@ struct TokiApp: App {
                 accounts: container.accountsVM,
                 codexAccounts: container.codexAccountsVM,
                 statistics: container.statisticsVM,
+                speed: container.speedVM,
                 addQuarantineEntry: { await addQuarantineEntry($0, container: container) },
                 deleteQuarantineEntry: { await deleteQuarantineEntry($0, container: container) },
                 navigation: container.navigation

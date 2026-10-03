@@ -8,6 +8,7 @@ import Observation
 /// notification) routes into the main window by setting `DashboardNavigation.section`.
 enum DashboardSection: Hashable {
     case usage
+    case speed
     case machine
     case accounts
     case settings
@@ -29,6 +30,7 @@ enum DashboardSection: Hashable {
     init?(identifier: String) {
         switch identifier {
         case "usage", "statistics":       self = .usage
+        case "speed":                     self = .speed
         case "machine", "instances", "environment": self = .machine
         case "accounts":                  self = .accounts
         case "settings":                  self = .settings

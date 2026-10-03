@@ -34,14 +34,17 @@ public enum CodexTranscriptParser {
     /// it parses — so an ordinal means the same line no matter where a scan started.
     static func parse(line: UnsafeRawBufferPointer, context: inout CodexParseContext) -> LineRecord? {
         context.ordinal += 1
-        // Byte prefilter: only four line types matter, and their type names cannot appear
-        // unescaped inside a string value. Response items (most of a rollout) are skipped
-        // without being decoded.
-        guard line.containsBytes("\"token_usage_record\"")
-            || line.containsBytes("\"token_count\"")
-            || line.containsBytes("\"turn_context\"")
-            || line.containsBytes("\"session_meta\"")
-        else { return nil }
+        switch LineKind(line) {
+        case .input:
+            // Input events only move the start anchor, and need nothing but the line's own
+            // timestamp — the first key of every rollout line — so they are never decoded.
+            if let ms = TranscriptParser.leadingTimestampMs(bytes: line) { context.anchorMs = ms }
+            return nil
+        case .skipped:
+            return nil
+        case .wanted:
+            break
+        }
         guard let base = line.baseAddress else { return nil }
         let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: base), count: line.count, deallocator: .none)
         // no-log: rollout parsing runs once per line and deliberately skips
@@ -58,16 +61,22 @@ public enum CodexTranscriptParser {
         case "turn_context":
             context.cwd = payload.cwd ?? context.cwd
             context.model = payload.model ?? context.model
+            context.effort = payload.effort?.lowercased() ?? context.effort
+        case "event_msg" where payload.type == "thread_settings_applied":
+            if let tier = payload.serviceTier { context.isFast = tier == "priority" }
         case "token_usage_record":
             guard let timestamp = object.timestamp.flatMap(TranscriptParser.parseTimestamp),
                   let usage = payload.usage
             else { return nil }
             context.sawUsageRecord = true
+            let end = TranscriptStore.milliseconds(timestamp)
+            let duration = context.anchorMs.flatMap { end >= $0 ? Int(end - $0) : nil }
+            context.anchorMs = end   // a response that follows directly starts here
             let recordSession = payload.sessionID ?? context.sessionID
             let responseID = payload.responseID ?? payload.turnID ?? String(context.ordinal)
             return .usage(record(
                 id: "codex:\(recordSession):\(responseID)", session: recordSession,
-                usage: usage, timestamp: timestamp, context: context
+                usage: usage, timestamp: timestamp, context: context, generationMs: duration
             ))
         case "event_msg" where payload.type == "token_count":
             // `last_token_usage` is the response that just finished; `total_token_usage`
@@ -79,9 +88,11 @@ public enum CodexTranscriptParser {
                   let timestamp = object.timestamp.flatMap(TranscriptParser.parseTimestamp)
             else { return nil }
             context.lastCountTotal = total.total
+            // No duration: this event is written after tool execution, not at the end of
+            // generation.
             return .countFallback(record(
                 id: "codex:\(context.sessionID):count-\(total.total)", session: context.sessionID,
-                usage: last, timestamp: timestamp, context: context
+                usage: last, timestamp: timestamp, context: context, generationMs: nil
             ))
         default:
             break
@@ -89,12 +100,67 @@ public enum CodexTranscriptParser {
         return nil
     }
 
+    /// What a line's byte prefilter makes of it, from one walk over its quotes (see
+    /// `UnsafeRawBufferPointer.forEachQuote(_:)`): the same answer as a `memmem` per token,
+    /// at the cost of reading the line once. Every token contains a quote and cannot appear
+    /// unescaped inside a string value.
+    enum LineKind: Equatable {
+        /// An input event (`"task_started"`, `"role":"user"`, or `_call_output"`, which
+        /// closes `function_call_output` / `custom_tool_call_output`). Wins over `wanted`.
+        case input
+        /// One of the line types that are decoded: `"token_usage_record"`,
+        /// `"token_count"`, `"turn_context"`, `"session_meta"`,
+        /// `"thread_settings_applied"`.
+        case wanted
+        /// Anything else — response items, most of a rollout — skipped undecoded.
+        case skipped
+
+        init(_ line: UnsafeRawBufferPointer) {
+            var input = false
+            var wanted = false
+            line.forEachQuote { quote in
+                // `_call_output"` is the one token that ends, rather than starts, at a quote.
+                if quote >= 12, line[quote - 1] == UInt8(ascii: "t"),
+                   line.hasBytes("_call_output\"", at: quote - 12) {
+                    input = true
+                    return false
+                }
+                guard quote + 1 < line.count else { return true }
+                switch line[quote + 1] {
+                case UInt8(ascii: "t"):
+                    if line.hasBytes("\"task_started\"", at: quote) {
+                        input = true
+                        return false
+                    }
+                    if !wanted {
+                        wanted = line.hasBytes("\"token_usage_record\"", at: quote)
+                            || line.hasBytes("\"token_count\"", at: quote)
+                            || line.hasBytes("\"turn_context\"", at: quote)
+                            || line.hasBytes("\"thread_settings_applied\"", at: quote)
+                    }
+                case UInt8(ascii: "r"):
+                    if line.hasBytes("\"role\":\"user\"", at: quote) {
+                        input = true
+                        return false
+                    }
+                case UInt8(ascii: "s"):
+                    if !wanted { wanted = line.hasBytes("\"session_meta\"", at: quote) }
+                default:
+                    break
+                }
+                return true
+            }
+            self = input ? .input : wanted ? .wanted : .skipped
+        }
+    }
+
     private static func record(
         id: String,
         session: String,
         usage: CodexLine.Usage,
         timestamp: Date,
-        context: CodexParseContext
+        context: CodexParseContext,
+        generationMs: Int?
     ) -> TranscriptRecord {
         // Codex reports cached and cache-write tokens inside `input_tokens`, and reasoning
         // tokens inside `output_tokens`. Partition input into mutually exclusive buckets so
@@ -114,7 +180,10 @@ public enum CodexTranscriptParser {
                 webSearch: 0,
                 webFetch: 0
             ),
-            isSidechain: false
+            isSidechain: false,
+            generationMs: generationMs,
+            effort: context.effort,
+            isFast: context.isFast
         )
     }
 }
@@ -169,6 +238,13 @@ public struct CodexParseContext: Sendable, Equatable {
     public var sawUsageRecord = false
     /// The highest `total_token_usage.total_tokens` counted from a `token_count` event.
     public var lastCountTotal = 0
+    /// When the response now being generated was requested (epoch ms): the latest
+    /// task start, user message, tool output or completed response.
+    public var anchorMs: Int64?
+    /// `turn_context.effort` in effect.
+    public var effort: String?
+    /// `thread_settings_applied` set `service_tier` to `priority`.
+    public var isFast = false
 
     public init(
         sessionID: String = "",
@@ -176,7 +252,10 @@ public struct CodexParseContext: Sendable, Equatable {
         model: String = "codex",
         ordinal: Int = 0,
         sawUsageRecord: Bool = false,
-        lastCountTotal: Int = 0
+        lastCountTotal: Int = 0,
+        anchorMs: Int64? = nil,
+        effort: String? = nil,
+        isFast: Bool = false
     ) {
         self.sessionID = sessionID
         self.cwd = cwd
@@ -184,6 +263,9 @@ public struct CodexParseContext: Sendable, Equatable {
         self.ordinal = ordinal
         self.sawUsageRecord = sawUsageRecord
         self.lastCountTotal = lastCountTotal
+        self.anchorMs = anchorMs
+        self.effort = effort
+        self.isFast = isFast
     }
 }
 
@@ -216,13 +298,18 @@ private struct CodexLine: Decodable {
         let turnID: String?
         let usage: Usage?
         let info: CountInfo?
+        let effort: String?
+        /// `thread_settings.service_tier` of a `thread_settings_applied` event.
+        let serviceTier: String?
 
         enum CodingKeys: String, CodingKey {
-            case type, id, cwd, model, usage, info
+            case type, id, cwd, model, usage, info, effort
             case sessionID = "session_id"
             case responseID = "response_id"
             case turnID = "turn_id"
+            case threadSettings = "thread_settings"
         }
+        enum ThreadSettingsKeys: String, CodingKey { case serviceTier = "service_tier" }
 
         init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -239,6 +326,9 @@ private struct CodexLine: Decodable {
             responseID = text(.responseID)
             turnID = text(.turnID)
             usage = c.lenient(Usage.self, .usage)
+            effort = text(.effort)
+            serviceTier = c.lenientNested(ThreadSettingsKeys.self, .threadSettings)?
+                .lenient(String.self, .serviceTier)
         }
     }
 

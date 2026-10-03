@@ -40,6 +40,9 @@ enum Palette {
     /// the assertion that documents this restriction. Not yet used by any call site.
     static let copper300 = adaptive(Tokens.copper300)
 
+    /// Categorical colours for chart series — FILL/LINE ONLY, never text. See `Tokens.chartSeries` for validation details.
+    static let series: [Color] = Tokens.chartSeries.map(adaptive)
+
     /// Deepest copper step. Not yet used by any call site.
     static let copper700 = adaptive(Tokens.copper700)
 

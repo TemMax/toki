@@ -50,6 +50,12 @@ public enum TranscriptParser {
         guard bytes.containsBytes("\"assistant\""), bytes.containsBytes("\"requestId\"") else {
             return nil
         }
+        return decodeRecord(bytes: bytes)
+    }
+
+    /// Decodes a line that passed the `parse(bytes:)` prefilter (or `ClaudeLineTokens`'s
+    /// equivalent `mayBeRecord`).
+    static func decodeRecord(bytes: UnsafeRawBufferPointer) -> TranscriptRecord? {
         guard let base = bytes.baseAddress else { return nil }
         let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: base), count: bytes.count, deallocator: .none)
         guard
@@ -81,8 +87,21 @@ public enum TranscriptParser {
             timestamp: timestamp,
             usage: message.usage?.tokenUsage ?? .zero,
             isSidechain: line.isSidechain ?? false,
-            billing: message.usage?.billing ?? []
+            billing: message.usage?.billing ?? [],
+            effort: line.effort?.lowercased(),
+            isFast: message.usage?.billing.contains(.fastMode) ?? false
         )
+    }
+
+    /// The top-level timestamp (epoch ms) of a line that *starts* a request — a prompt or a
+    /// tool result (both `"type":"user"`) — read by byte search with no decode.
+    ///
+    /// Other non-assistant lines are written while a response is already streaming, or after
+    /// the request was sent, so treating them as a start would shorten it: queued messages, PR
+    /// links, titles and attachments (such as `deferred_tools_record`) all return nil. The
+    /// timestamp itself comes from `leadingTimestampMs(bytes:)`.
+    public static func inputTimestampMs(bytes: UnsafeRawBufferPointer) -> Int64? {
+        ClaudeLineTokens(bytes).inputTimestampMs(bytes: bytes)
     }
 
     // MARK: - Helpers
@@ -91,6 +110,66 @@ public enum TranscriptParser {
         if let d = ISO8601Timestamp.parse(string) { return d }
         if let d = isoFractional.date(from: string) { return d }
         return isoPlain.date(from: string)
+    }
+}
+
+// MARK: - Byte prefilter
+
+/// Every token the indexer tests a Claude line for, found in one walk over its quotes.
+///
+/// It answers exactly what a `memmem` per token would — each token starts with a quote, and
+/// every quote is visited — but reads the line once instead of up to six times; the tokens
+/// can only match unescaped JSON syntax, never the inside of a string value.
+struct ClaudeLineTokens {
+    /// `"assistant"`
+    private(set) var assistant = false
+    /// `"requestId"`
+    private(set) var requestId = false
+    /// `"type":"user"`
+    private(set) var typeUser = false
+    /// `"type":"attachment"` — recognised, but never a request start (see `inputTimestampMs`).
+    private(set) var typeAttachment = false
+    /// `"type":"assistant"`
+    private(set) var typeAssistant = false
+    /// Offset just past the first `"timestamp":"` — the top-level one (see
+    /// `TranscriptParser.leadingTimestampMs(bytes:)`).
+    private(set) var timestampValue: Int?
+
+    init(_ bytes: UnsafeRawBufferPointer) {
+        bytes.forEachQuote { quote in
+            guard quote + 1 < bytes.count else { return true }
+            switch bytes[quote + 1] {
+            case UInt8(ascii: "a"):
+                if !assistant { assistant = bytes.hasBytes("\"assistant\"", at: quote) }
+            case UInt8(ascii: "r"):
+                if !requestId { requestId = bytes.hasBytes("\"requestId\"", at: quote) }
+            case UInt8(ascii: "t"):
+                if bytes.hasBytes("\"type\":\"", at: quote) {
+                    let value = quote + 8
+                    if bytes.hasBytes("user\"", at: value) {
+                        typeUser = true
+                    } else if bytes.hasBytes("attachment\"", at: value) {
+                        typeAttachment = true
+                    } else if bytes.hasBytes("assistant\"", at: value) {
+                        typeAssistant = true
+                    }
+                } else if timestampValue == nil, bytes.hasBytes("\"timestamp\":\"", at: quote) {
+                    timestampValue = quote + 13
+                }
+            default:
+                break
+            }
+            return true
+        }
+    }
+
+    /// The `parse(bytes:)` prefilter: only such a line can be an assistant record.
+    var mayBeRecord: Bool { assistant && requestId }
+
+    /// `TranscriptParser.inputTimestampMs(bytes:)` for the line these tokens were read from.
+    func inputTimestampMs(bytes: UnsafeRawBufferPointer) -> Int64? {
+        guard typeUser, !typeAssistant, let timestampValue else { return nil }
+        return TranscriptParser.timestampMs(bytes: bytes, valueAt: timestampValue)
     }
 }
 
@@ -108,10 +187,11 @@ private struct ClaudeLine: Decodable {
     let sessionId: String?
     let cwd: String?
     let isSidechain: Bool?
+    let effort: String?
     let message: Message?
 
     enum CodingKeys: String, CodingKey {
-        case type, requestId, timestamp, sessionId, cwd, isSidechain, message
+        case type, requestId, timestamp, sessionId, cwd, isSidechain, effort, message
     }
 
     init(from decoder: any Decoder) throws {
@@ -122,6 +202,7 @@ private struct ClaudeLine: Decodable {
         sessionId = c.lenient(String.self, .sessionId)
         cwd = c.lenient(String.self, .cwd)
         isSidechain = c.lenient(Bool.self, .isSidechain)
+        effort = c.lenient(String.self, .effort)
         message = c.lenient(Message.self, .message)
     }
 

@@ -32,6 +32,8 @@ struct DashboardView: View {
     @Bindable var codexAccounts: CodexAccountsViewModel
     // Optional for the same reason — nil just hides the Usage tab's all-time statistics block.
     var statistics: StatisticsViewModel? = nil
+    // Optional too — nil just drops the Speed tab from the strip.
+    var speed: SpeedViewModel? = nil
     /// Adopts / discards a quarantined credential — see `AccountsView`'s doc comment
     /// for why these are closures rather than `AccountsViewModel` methods.
     var addQuarantineEntry: (QuarantineEntry) async -> Void = { _ in }
@@ -51,13 +53,25 @@ struct DashboardView: View {
     /// the same window should restore the groups the user was comparing.
     @State private var machineExpansion = MachineExpansionState()
 
+    /// Whether the toolbar carries the Usage range row. Only Usage does, so only Usage's
+    /// toolbar — and content top — is taller (`Measure.dashboardToolbar(showsRangeRow:)`).
+    private var showsRangeRow: Bool {
+        providerAvailability.hasAnyProvider && navigation.section == .usage
+    }
+
     /// Height reserved for the floating toolbar. Scroll content is inset by this so it
     /// starts below the bar, then scrolls *under* it through the progressive blur.
-    private let toolbarHeight = Measure.dashboardToolbar
+    private var toolbarHeight: CGFloat { Measure.dashboardToolbar(showsRangeRow: showsRangeRow) }
+
+    /// Speed polls the index only while it is the tab on screen.
+    private func updateSpeedVisibility(for section: DashboardSection) {
+        speed?.isVisible = providerAvailability.hasAnyProvider && section == .speed
+    }
 
     private var availableSections: [DashboardSection] {
         var sections: [DashboardSection] = []
         if providerAvailability.hasAnyProvider { sections.append(.usage) }
+        if providerAvailability.hasAnyProvider, speed != nil { sections.append(.speed) }
         if providerAvailability.hasAnyProvider { sections.append(.machine) }
         if providerAvailability.hasAnyProvider { sections.append(.accounts) }
         sections.append(.settings)
@@ -75,6 +89,7 @@ struct DashboardView: View {
                         navigation.section = availableSections.first ?? .settings
                     }
                     model.isVisible = providerAvailability.hasAnyProvider
+                    updateSpeedVisibility(for: navigation.section)
                     if providerAvailability.hasAnyProvider {
                         model.load()
                         statistics?.load()
@@ -87,6 +102,10 @@ struct DashboardView: View {
                     // Live analytics reloads are pointless — and expensive — with the
                     // window closed.
                     model.isVisible = false
+                    speed?.isVisible = false
+                }
+                .onChange(of: navigation.section) { _, section in
+                    updateSpeedVisibility(for: section)
                 }
 
             // Keychain-onboarding overlay: covers the dashboard until access is granted,
@@ -142,7 +161,7 @@ struct DashboardView: View {
 
                 // Indexing indicator (inline, non-blocking) — only meaningful for Usage.
                 if providerAvailability.hasAnyProvider,
-                   navigation.section == .usage,
+                   navigation.section == .usage || navigation.section == .speed,
                    model.isIndexing {
                     HStack(spacing: 5) {
                         ProgressView()
@@ -168,13 +187,6 @@ struct DashboardView: View {
                 SectionSwitch(selection: $navigation.section, items: availableSections)
                 Spacer()
 
-                if providerAvailability.hasAnyProvider, navigation.section == .usage {
-                    SegmentedControl(selection: $model.range)
-                        .onChange(of: model.range) { _, _ in
-                            model.load()
-                        }
-                }
-
                 if navigation.section != .settings {
                     Button {
                         switch navigation.section {
@@ -186,6 +198,8 @@ struct DashboardView: View {
                             if providerAvailability.codex {
                                 menuBar.refreshCodexNow()
                             }
+                        case .speed:
+                            speed?.refresh()
                         case .machine:
                             if providerAvailability.hasAnyProvider {
                                 instances.load()
@@ -213,6 +227,19 @@ struct DashboardView: View {
                 }
             }
             .frame(height: 30)
+
+            // Row 3: the Usage range, under the tab strip it belongs to — on the tab row it
+            // collided with a fifth tab at the minimum width. Present only on Usage, so the
+            // other tabs keep the shorter toolbar. No animation on the height: a tab switch is
+            // a tens-of-times-a-day action.
+            if showsRangeRow {
+                HStack {
+                    SegmentedControl(selection: $model.range)
+                        .onChange(of: model.range) { _, _ in model.load() }
+                    Spacer()
+                }
+                .frame(height: 30)
+            }
         }
         // The title row sits ON the traffic-light band (nudged right of the buttons);
         // the account + tabs rows fall directly beneath it, aligned to the content's
@@ -263,8 +290,16 @@ struct DashboardView: View {
             let claudeBusy = providerAvailability.claudeCode && accounts?.swapInFlight != nil
             let codexBusy = providerAvailability.codex && codexAccounts.swapInFlight != nil
             return claudeBusy || codexBusy
+        case .speed: return speed?.isComputing ?? false
         case .settings: return false
         }
+    }
+
+    /// Claude's last read failed and the gauges show the previous values. The `CLAUDE LIMITS`
+    /// header says so (`DashboardContent.limitsTitle`).
+    private var claudeUsageStale: Bool {
+        guard providerAvailability.claudeCode, case .stale = menuBar.state else { return false }
+        return true
     }
 
     private var displayedClaudeLimits: UsageLimits? {
@@ -304,21 +339,28 @@ struct DashboardView: View {
                     .environmentObject(updater)
             case .usage:
                 usageContent
+            case .speed:
+                if let speed { SpeedView(model: speed) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Where the tabs start, decided ONCE for all four (`Measure.dashboardContentTop`)
-        // rather than by four separate `topInset:` arguments that only happened to agree.
+        // Where the tabs start, decided ONCE for all five (`Measure.dashboardContentTop`)
+        // rather than by five separate `topInset:` arguments that only happened to agree.
         //
         // A content margin, NOT a safe area: it moves where SCROLL content begins and nothing
-        // else, which is the whole of what the four tabs' `topInset:` arguments used to do.
+        // else, which is the whole of what the five tabs' `topInset:` arguments used to do.
         // `safeAreaPadding` was tried and rejected — it repositions every child, so the
         // non-scrolling states below (indexing, loading) stopped being centered in the window
         // and the error banner picked up a second toolbar's worth of offset.
         //
         // It is an environment value, so it reaches the Settings tab's sheets as well; those
         // opt back out where they are presented (see `SettingsSections.body`).
-        .contentMargins(.top, Measure.dashboardContentTop, for: .scrollContent)
+        .contentMargins(.top, Measure.dashboardContentTop(showsRangeRow: showsRangeRow), for: .scrollContent)
+        // The toolbar overlay ignores the top safe area (the hidden title bar's 32 pt), so its
+        // rows start at the top of the window. The content must measure from the same origin:
+        // left inside the safe area, every margin above landed 32 pt lower than the toolbar
+        // it was sized against, and the gap under the last row was double what `Measure` says.
+        .ignoresSafeArea(edges: .top)
     }
 
 
@@ -334,7 +376,7 @@ struct DashboardView: View {
             // scroll region beneath it.
             VStack(spacing: 0) {
                 errorBanner(errorMsg)
-                    .padding(.top, toolbarHeight)
+                    .padding(.top, Measure.dashboardContentTop(showsRangeRow: showsRangeRow))
                 usageScroll
                     // The banner has already spent the toolbar band, so this scroll region
                     // OVERRIDES the inset `contentArea` hands every tab instead of starting
@@ -352,12 +394,6 @@ struct DashboardView: View {
     private var usageScroll: some View {
         ScrollView {
             if providerAvailability.claudeCode {
-                if case .stale = menuBar.state {
-                    Text("Claude usage could not be updated. Showing the last available values.")
-                        .textStyle(.detail)
-                        .foregroundStyle(Palette.warn)
-                        .padding(.horizontal, Spacing.xl)
-                }
                 if menuBar.state == .needsAccess || menuBar.state == .notLoggedIn || menuBar.claudeNeedsReconnect {
                     Button("Connect Claude…") {
                         NotificationCenter.default.post(name: .tokiPresentKeychainSetup, object: nil)
@@ -371,6 +407,7 @@ struct DashboardView: View {
                     limits: displayedClaudeLimits,
                     claudeResetLimits: menuBar.currentClaudeResetLimits,
                     allowsStaleClaudeResetDisplay: menuBar.allowsStaleClaudeResetDisplay,
+                    claudeUsageStale: claudeUsageStale,
                     codexLimits: displayedCodexLimits,
                     codexResetLimits: menuBar.currentCodexResetLimits,
                     // Before accounts load the list is empty (0), which is neither
@@ -404,6 +441,7 @@ struct DashboardView: View {
                         limits: displayedClaudeLimits,
                         claudeResetLimits: menuBar.currentClaudeResetLimits,
                         allowsStaleClaudeResetDisplay: menuBar.allowsStaleClaudeResetDisplay,
+                        claudeUsageStale: claudeUsageStale,
                         codexLimits: displayedCodexLimits,
                         codexResetLimits: menuBar.currentCodexResetLimits,
                         serviceStatus: providerAvailability.claudeCode
@@ -592,6 +630,9 @@ struct DashboardContent: View {
     let limits: UsageLimits?
     var claudeResetLimits: UsageLimits? = nil
     var allowsStaleClaudeResetDisplay = false
+    /// Claude's usage could not be updated and the limits shown are the last available ones.
+    /// A plain value, like the rest, for the snapshot harness. Said in the `CLAUDE LIMITS` header.
+    var claudeUsageStale = false
     var codexLimits: UsageLimits? = nil
     var codexResetLimits: UsageLimits? = nil
     /// Accounts currently stored. Defaults to 1 (the pre-multi-account behavior) for the
@@ -642,16 +683,25 @@ struct DashboardContent: View {
                     limits,
                     provider: "CLAUDE",
                     claudeResets: claudeResetLimits,
-                    allowsStaleClaudeResetDisplay: allowsStaleClaudeResetDisplay
+                    allowsStaleClaudeResetDisplay: allowsStaleClaudeResetDisplay,
+                    stale: claudeUsageStale
                 )
                     .staggerIn(index: 0, isVisible: isVisible)
             } else if showsClaudeCode, let claudeResetLimits {
                 resetOnlySection(
                     provider: "CLAUDE",
                     claudeResets: claudeResetLimits,
-                    allowsStaleClaudeResetDisplay: allowsStaleClaudeResetDisplay
+                    allowsStaleClaudeResetDisplay: allowsStaleClaudeResetDisplay,
+                    stale: claudeUsageStale
                 )
                     .staggerIn(index: 0, isVisible: isVisible)
+            } else if showsClaudeCode, claudeUsageStale {
+                // Stale with nothing to draw under it (every gauge window switched off, no
+                // resets): the header alone still says the numbers are old.
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
+                    limitsTitle("CLAUDE", stale: true)
+                }
+                .staggerIn(index: 0, isVisible: isVisible)
             }
             if showsCodex, let codexLimits {
                 limitsSection(codexLimits, provider: "CODEX", showsAccountScope: false, resets: codexResetLimits)
@@ -727,18 +777,20 @@ struct DashboardContent: View {
         showsAccountScope: Bool = true,
         claudeResets: UsageLimits? = nil,
         allowsStaleClaudeResetDisplay: Bool = false,
-        resets: UsageLimits? = nil
+        resets: UsageLimits? = nil,
+        stale: Bool = false
     ) -> some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
             // These gauges are the ACTIVE account's, but they sit directly above the
             // all-accounts usage totals — so with more than one account stored, say whose
             // limits these are to keep the two figures from being conflated.
             HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
-                SectionHeader("\(provider) LIMITS")
+                limitsTitle(provider, stale: stale)
                 if showsAccountScope, accountCount > 1 {
                     Text("\u{2014} active account")
                         .textStyle(.detail)
                         .foregroundStyle(Palette.textSecondary.opacity(0.8))
+                        .layoutPriority(1)
                 }
                 Spacer(minLength: Spacing.xs)
                 if let claudeResets {
@@ -761,7 +813,8 @@ struct DashboardContent: View {
     private func resetOnlySection(
         provider: String,
         claudeResets: UsageLimits,
-        allowsStaleClaudeResetDisplay: Bool
+        allowsStaleClaudeResetDisplay: Bool,
+        stale: Bool = false
     ) -> some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             if let resets = claudeResets.claudeResets,
@@ -771,11 +824,12 @@ struct DashboardContent: View {
                    allowsStale: allowsStaleClaudeResetDisplay
                ) != .hidden {
                 HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
-                    SectionHeader("\(provider) LIMITS")
+                    limitsTitle(provider, stale: stale)
                     if accountCount > 1 {
                         Text("\u{2014} active account")
                             .textStyle(.detail)
                             .foregroundStyle(Palette.textSecondary.opacity(0.8))
+                            .layoutPriority(1)
                     }
                     Spacer(minLength: Spacing.xs)
                     ClaudeResetsView(
@@ -783,7 +837,38 @@ struct DashboardContent: View {
                         allowsStaleDisplay: allowsStaleClaudeResetDisplay
                     )
                 }
+            } else if stale {
+                // The resets have expired, but the header still owes the stale note.
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
+                    limitsTitle(provider, stale: true)
+                }
             }
+        }
+    }
+
+    /// The `<PROVIDER> LIMITS` title. When the provider's usage could not be updated the same
+    /// fact follows it in parentheses, in the row the reader is already looking at, instead of
+    /// on a line of its own above the section. It is the part of the row that gives way when
+    /// the window is narrow (the title and the account scope keep their priority), and the
+    /// full sentence stays in the tooltip. VoiceOver gets one element for the pair.
+    @ViewBuilder
+    private func limitsTitle(_ provider: String, stale: Bool) -> some View {
+        if stale {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
+                SectionHeader("\(provider) LIMITS")
+                    .layoutPriority(2)
+                Text("(could not be updated \u{00B7} showing the last available values)")
+                    .textStyle(.detail)
+                    .foregroundStyle(Palette.warn)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .help("\(provider.capitalized) usage could not be updated. Showing the last available values.")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(provider.capitalized) limits, could not be updated, showing the last available values")
+        } else {
+            SectionHeader("\(provider) LIMITS")
+                .layoutPriority(2)
         }
     }
 }
@@ -856,6 +941,7 @@ private struct SectionSwitch: View {
     @Binding var selection: DashboardSection
     let items: [DashboardSection]
     @Namespace private var namespace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -863,8 +949,8 @@ private struct SectionSwitch: View {
                 segment(for: item)
             }
         }
-        // Names the set the four buttons belong to, so a screen-reader user hears
-        // "Section, Usage, selected" instead of four unrelated buttons.
+        // Names the set the buttons belong to, so a screen-reader user hears
+        // "Section, Usage, selected" instead of unrelated buttons.
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Section")
         .padding(3)
@@ -873,19 +959,20 @@ private struct SectionSwitch: View {
                 .fill(Palette.textPrimary.opacity(0.06))
         )
         // Was a fixed 540 for 5 segments (108pt each) before the Statistics tab retired into
-        // Usage; 4 segments at the same per-item width.
+        // Usage; the Speed tab makes it five again at the same per-item width.
         .frame(
             minWidth: CGFloat(items.count) * 82.5,
             maxWidth: CGFloat(items.count) * 108
         )
         .frame(height: 30)
         .fixedSize(horizontal: false, vertical: true)
-        .animation(.spring(response: 0.28, dampingFraction: 0.85), value: selection)
+        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.85), value: selection)
     }
 
     private func label(for item: DashboardSection) -> String {
         switch item {
         case .usage:       return "Usage"
+        case .speed:       return "Speed"
         case .machine:     return "Machine"
         case .accounts:    return "Accounts"
         case .settings:    return "Settings"
@@ -922,7 +1009,7 @@ private struct SectionSwitch: View {
         .buttonStyle(SegmentButtonStyle())
         .segmentFocusRing()
         // Appearance already says which tab is current; this is the same fact said out loud,
-        // so a screen-reader user can tell the active section from the other three.
+        // so a screen-reader user can tell the active section from the others.
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 }

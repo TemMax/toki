@@ -16,6 +16,15 @@ public struct FileIndexState: Sendable, Equatable {
     public var device: UInt64
     /// Last FSEvent id associated with this file (best-effort).
     public var lastEventId: UInt64
+    /// Timestamp (epoch ms) of the last prompt/tool-result (`"type":"user"`) line before
+    /// `lastByteOffset` — the start of whichever request comes next. Persisted so a request
+    /// whose lines straddle two catch-up reads gets the same start as a whole-file read.
+    public var lastInputMs: Int64?
+    /// The request of the last block before `lastByteOffset`, and its start (epoch ms; nil
+    /// when it had none). Persisted so a block of that request read by the next catch-up —
+    /// after a tool result moved `lastInputMs` — keeps the start a whole-file read gives it.
+    public var openRequestId: String?
+    public var openRequestStartMs: Int64?
 
     public init(
         path: String,
@@ -23,7 +32,10 @@ public struct FileIndexState: Sendable, Equatable {
         lastKnownSize: UInt64 = 0,
         inode: UInt64 = 0,
         device: UInt64 = 0,
-        lastEventId: UInt64 = 0
+        lastEventId: UInt64 = 0,
+        lastInputMs: Int64? = nil,
+        openRequestId: String? = nil,
+        openRequestStartMs: Int64? = nil
     ) {
         self.path = path
         self.lastByteOffset = lastByteOffset
@@ -31,6 +43,9 @@ public struct FileIndexState: Sendable, Equatable {
         self.inode = inode
         self.device = device
         self.lastEventId = lastEventId
+        self.lastInputMs = lastInputMs
+        self.openRequestId = openRequestId
+        self.openRequestStartMs = openRequestStartMs
     }
 }
 

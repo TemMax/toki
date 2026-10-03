@@ -58,7 +58,7 @@ struct MachineView: View {
     let expansion: MachineExpansionState
     /// Extra top padding for callers that render this view OUTSIDE the dashboard — the
     /// snapshot harness and the debug control channel. As a dashboard tab it is 0: clearing
-    /// the floating toolbar is `DashboardView`'s job, done once for all four tabs
+    /// the floating toolbar is `DashboardView`'s job, done once for all five tabs
     /// (`Measure.dashboardContentTop`).
     var topInset: CGFloat = 0
 

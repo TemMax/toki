@@ -391,6 +391,33 @@ struct ScanJobTests {
         #expect(withContext.context == saved)
     }
 
+    @Test("The open Claude request is carried only into a resumed read")
+    func openRequestCarried() throws {
+        let sandbox = TempSandbox()
+        defer { sandbox.cleanup() }
+        let url = sandbox.file("a.jsonl")
+        try write("line\nmore\n", to: url)
+        var prior = try state(of: url, offset: 5, size: 5)
+        prior.lastInputMs = 1_780_000_005_000
+        prior.openRequestId = "req_1"
+        prior.openRequestStartMs = 1_780_000_000_000
+
+        let resumed = try #require(ScanJob.make(path: url.path, kind: .claude, prior: prior))
+        #expect(resumed.openRequestId == "req_1")
+        #expect(resumed.openRequestStartMs == 1_780_000_000_000)
+        let after = resumed.state(after: LineScanner.Result(consumedOffset: 10, completeLines: 1),
+                                  lastInputMs: 7, openRequestId: "req_2", openRequestStartMs: 3)
+        #expect(after.openRequestId == "req_2")
+        #expect(after.openRequestStartMs == 3)
+
+        prior.lastByteOffset = 50
+        prior.lastKnownSize = 50
+        let restarted = try #require(ScanJob.make(path: url.path, kind: .claude, prior: prior))
+        #expect(restarted.startOffset == 0)
+        #expect(restarted.openRequestId == nil)
+        #expect(restarted.openRequestStartMs == nil)
+    }
+
     @Test("A directory is not a job")
     func directoryIsSkipped() {
         let sandbox = TempSandbox()
@@ -471,6 +498,114 @@ struct TranscriptStoreTests {
         try store.setMeta(key: "k", value: "v")
         #expect(try store.getMeta(key: "k") == "v")
         #expect(try store.getMeta(key: "absent") == nil)
+    }
+
+    private func speedRecord(
+        _ id: String, output: Int, generationMs: Int?, effort: String? = "high", isFast: Bool = false
+    ) -> TranscriptRecord {
+        TranscriptRecord(
+            requestId: id, sessionId: "s", cwd: "/c", model: "claude-opus-5-5",
+            timestamp: Date(timeIntervalSince1970: 1_780_000_000),
+            usage: TokenUsage(input: 1, output: output, cacheRead: 0, ephemeral5m: 0, ephemeral1h: 0, webSearch: 0, webFetch: 0),
+            isSidechain: false, billing: isFast ? [.fastMode] : [],
+            generationMs: generationMs, effort: effort, isFast: isFast
+        )
+    }
+
+    @Test("Speed fields round-trip, and an absent duration reads back as nil")
+    func speedFieldsRoundTrip() throws {
+        let sandbox = TempSandbox(); defer { sandbox.cleanup() }
+        let store = try TranscriptStore(databaseURL: sandbox.dbURL)
+        try store.upsertEntries([
+            speedRecord("a", output: 300, generationMs: 4_000, effort: "xhigh", isFast: true),
+            speedRecord("b", output: 300, generationMs: nil, effort: nil),
+        ])
+        let byId = Dictionary(uniqueKeysWithValues: try store.allRecords().map { ($0.requestId, $0) })
+        #expect(byId["a"]?.generationMs == 4_000)
+        #expect(byId["a"]?.effort == "xhigh")
+        #expect(byId["a"]?.isFast == true)
+        #expect(byId["b"]?.generationMs == nil)
+        #expect(byId["b"]?.effort == nil)
+    }
+
+    @Test("Same output: the longer duration wins; a nil duration never erases a known one")
+    func durationUpsertRule() throws {
+        let sandbox = TempSandbox(); defer { sandbox.cleanup() }
+        let store = try TranscriptStore(databaseURL: sandbox.dbURL)
+        try store.upsertEntry(speedRecord("r", output: 500, generationMs: 3_000))
+        try store.upsertEntry(speedRecord("r", output: 500, generationMs: 5_000)) // later block, same usage
+        #expect(try store.allRecords().first?.generationMs == 5_000)
+        try store.upsertEntry(speedRecord("r", output: 500, generationMs: 4_000)) // a forked copy, earlier
+        #expect(try store.allRecords().first?.generationMs == 5_000)
+        try store.upsertEntry(speedRecord("r", output: 500, generationMs: nil))   // a copy without its anchor
+        #expect(try store.allRecords().first?.generationMs == 5_000)
+        try store.upsertEntry(speedRecord("r", output: 900, generationMs: 6_500)) // grew: replaces
+        #expect(try store.allRecords().first?.generationMs == 6_500)
+        try store.upsertEntry(speedRecord("r", output: 100, generationMs: 9_999)) // smaller snapshot: ignored
+        #expect(try store.allRecords().first?.generationMs == 6_500)
+    }
+
+    @Test("An index created before the speed columns gains them without losing rows")
+    func speedColumnsMigrate() throws {
+        let sandbox = TempSandbox(); defer { sandbox.cleanup() }
+        var db: OpaquePointer?
+        #expect(sqlite3_open(sandbox.dbURL.path, &db) == SQLITE_OK)
+        let legacy = """
+        CREATE TABLE entries (request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, cwd TEXT NOT NULL,
+            model TEXT NOT NULL, timestamp_ms INTEGER NOT NULL, input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL, cache_read_tokens INTEGER NOT NULL,
+            ephemeral_5m_tokens INTEGER NOT NULL, ephemeral_1h_tokens INTEGER NOT NULL,
+            web_search INTEGER NOT NULL, web_fetch INTEGER NOT NULL, is_sidechain INTEGER NOT NULL,
+            billing INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO entries VALUES ('old','s','/c','claude-opus-4-8',1000,1,250,0,0,0,0,0,0,0);
+        """
+        #expect(sqlite3_exec(db, legacy, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(db)
+
+        let store = try TranscriptStore(databaseURL: sandbox.dbURL)
+        let old = try #require(try store.allRecords().first)
+        #expect(old.requestId == "old")
+        #expect(old.usage.output == 250)
+        #expect(old.generationMs == nil)
+        #expect(old.isFast == false)
+    }
+
+    @Test("A file's last input timestamp round-trips, nil included")
+    func lastInputRoundTrip() throws {
+        let sandbox = TempSandbox(); defer { sandbox.cleanup() }
+        let store = try TranscriptStore(databaseURL: sandbox.dbURL)
+        let anchored = FileIndexState(path: "/a.jsonl", lastByteOffset: 10, lastKnownSize: 10, lastInputMs: 1_780_000_000_123)
+        let bare = FileIndexState(path: "/b.jsonl", lastByteOffset: 5, lastKnownSize: 5)
+        try store.upsertFileState(anchored)
+        try store.upsertFileState(bare)
+        #expect(try store.fileState(path: "/a.jsonl") == anchored)
+        #expect(try store.allFileStates()["/b.jsonl"]?.lastInputMs == nil)
+    }
+
+    @Test("A file's open request and its start round-trip, nil included")
+    func openRequestRoundTrip() throws {
+        let sandbox = TempSandbox(); defer { sandbox.cleanup() }
+        let store = try TranscriptStore(databaseURL: sandbox.dbURL)
+        let open = FileIndexState(path: "/a.jsonl", lastByteOffset: 10, lastKnownSize: 10,
+                                  lastInputMs: 1_780_000_005_000, openRequestId: "req_1",
+                                  openRequestStartMs: 1_780_000_000_000)
+        let unanchored = FileIndexState(path: "/b.jsonl", lastByteOffset: 5, lastKnownSize: 5, openRequestId: "req_2")
+        try store.upsertFileState(open)
+        try store.upsertFileState(unanchored)
+        #expect(try store.fileState(path: "/a.jsonl") == open)
+        #expect(try store.allFileStates()["/a.jsonl"] == open)
+        #expect(try store.allFileStates()["/b.jsonl"] == unanchored)
+        #expect(try store.fileState(path: "/b.jsonl")?.openRequestStartMs == nil)
+    }
+
+    @Test("A Codex context's anchor, effort and tier round-trip")
+    func codexContextSpeedRoundTrip() throws {
+        let sandbox = TempSandbox(); defer { sandbox.cleanup() }
+        let store = try TranscriptStore(databaseURL: sandbox.dbURL)
+        let context = CodexParseContext(sessionID: "s", cwd: "/c", model: "gpt-6-sol", ordinal: 7,
+                                        anchorMs: 1_780_000_000_000, effort: "high", isFast: true)
+        try store.upsertCodexContext(context, path: "/r.jsonl")
+        #expect(try store.allCodexContexts()["/r.jsonl"] == context)
     }
 }
 

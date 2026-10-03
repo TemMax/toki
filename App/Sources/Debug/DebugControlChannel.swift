@@ -28,7 +28,7 @@ import TokiFixtures
 ///
 /// **No command reads or writes Keychain items, credentials, tokens or account secrets.**
 /// The channel moves UI state only: scenarios, navigation, appearance, window size,
-/// snapshots, window ids, and the accessibility tree.
+/// snapshots, window ids, the accessibility tree, and a tab's scroll position.
 ///
 /// **No command takes focus from the user.** An agent driving this channel runs while its
 /// owner is at the keyboard, so a command that threw a window over their work would make the
@@ -240,7 +240,7 @@ enum DebugControlChannel {
         let reply = ReplyBox()
         let done = DispatchSemaphore(value: 0)
         Task { @MainActor in
-            reply.value = respond(to: line)
+            reply.value = await respondAllowingSuspension(to: line)
             done.signal()
         }
         done.wait()
@@ -269,8 +269,20 @@ enum DebugControlChannel {
 
     private static let commands = [
         "surfaces", "scenario", "navigate", "snapshot", "windows", "tree", "click", "appearance",
-        "resize",
+        "resize", "scroll",
     ]
+
+    /// `scroll` runs for seconds and must leave the main thread free while it does — a
+    /// display link, not a nested run loop, drives it, so what it measures is the app's own
+    /// frame loop. Every other command answers synchronously through `respond(to:)`.
+    private static func respondAllowingSuspension(to line: String) async -> String {
+        guard
+            let data = line.data(using: .utf8),
+            let request = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            request["cmd"] as? String == "scroll"
+        else { return respond(to: line) }
+        return await scroll(request["args"] as? [String: Any] ?? [:])
+    }
 
     private static func respond(to line: String) -> String {
         guard
@@ -294,6 +306,7 @@ enum DebugControlChannel {
         case "click":      return click(args)
         case "appearance": return appearance(args)
         case "resize":     return resize(args)
+        case "scroll":     return fail("scroll is handled asynchronously")
         default:
             return fail("unknown command \"\(command)\"; valid commands: \(commands.joined(separator: ", "))")
         }
@@ -330,6 +343,8 @@ enum DebugControlChannel {
         /// rendering standalone: the review compares against earlier renders of exactly
         /// these names, so they stay addressable by them.
         case instances, environment, statistics
+        /// The generation speed tab.
+        case speed
         /// The status item's rendered indicator strip — not the real `NSStatusItem` (there is
         /// no first-party access to it, and `screencapture`/AppleScript need a Screen Recording
         /// TCC grant this control channel exists to avoid), but the exact `MenuBarStripView`
@@ -377,6 +392,7 @@ enum DebugControlChannel {
             case .popover, .dashboard, .gallery, .menuBarStrip, .menuBarEditor, .notificationsEditor: nil
             case .instances, .environment, .statistics: nil
             case .usage: .usage
+            case .speed: .speed
             case .machine: .machine
             case .accounts: .accounts
             case .settings: .settings
@@ -465,6 +481,7 @@ enum DebugControlChannel {
             accounts: container.accountsVM,
             codexAccounts: container.codexAccountsVM,
             statistics: container.statisticsVM,
+            speed: container.speedVM,
             navigation: navigation
         )
 
@@ -750,6 +767,50 @@ enum DebugControlChannel {
         // and reporting it back would look like the resize had been clamped.
         let size = window.contentRect(forFrameRect: window.frame).size
         return ok(["width": Int(size.width.rounded()), "height": Int(size.height.rounded())])
+    }
+
+    /// Opens `section` (unfocused, as `navigate` does), waits for its content to outgrow the
+    /// viewport, then hands the tab's main scroll view to `ScrollProbe`.
+    private static func scroll(_ args: [String: Any]) async -> String {
+        let section = args["section"] as? String ?? "speed"
+        let seconds = (args["seconds"] as? NSNumber)?.doubleValue ?? 10
+        let pointsPerSecond = (args["pointsPerSecond"] as? NSNumber)?.doubleValue ?? 600
+        guard seconds > 0, seconds <= 120 else { return fail("seconds must be in (0, 120]") }
+        guard pointsPerSecond > 0 else { return fail("pointsPerSecond must be positive") }
+
+        let opened = navigate(["section": section])
+        guard opened.contains("\"ok\":true") else { return opened }
+
+        // The tab may still be computing its content; give it up to 10 s to become scrollable.
+        var scrollView: NSScrollView?
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            if let found = dashboardWindow.flatMap(mainScrollView(in:)) { scrollView = found; break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard let scrollView else {
+            return fail("no scrollable content on \"\(section)\" — is the tab populated and taller than the window?")
+        }
+        // One more beat so the entrance animation has settled before frames are counted.
+        try? await Task.sleep(for: .milliseconds(800))
+        var fields = await ScrollProbe.run(scrollView, seconds: seconds, pointsPerSecond: pointsPerSecond)
+        fields["section"] = section
+        return ok(fields)
+    }
+
+    /// The largest on-screen scroll view whose document is taller than its viewport.
+    private static func mainScrollView(in window: NSWindow) -> NSScrollView? {
+        var found: [NSScrollView] = []
+        func walk(_ view: NSView) {
+            if let scroll = view as? NSScrollView, !scroll.isHiddenOrHasHiddenAncestor,
+               let document = scroll.documentView,
+               document.frame.height > scroll.contentView.bounds.height + 1 {
+                found.append(scroll)
+            }
+            view.subviews.forEach(walk)
+        }
+        window.contentView.map(walk)
+        return found.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
     }
 
     // MARK: - Windows
