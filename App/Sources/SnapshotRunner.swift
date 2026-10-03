@@ -94,6 +94,7 @@ enum SnapshotRunner {
                 accounts: container.accountsVM,
                 codexAccounts: container.codexAccountsVM,
                 statistics: container.statisticsVM,
+                speed: container.speedVM,
                 navigation: container.navigation
             )
             .environmentObject(container.updater)
@@ -202,6 +203,7 @@ enum SnapshotRunner {
                     accounts: container.accountsVM,
                     codexAccounts: container.codexAccountsVM,
                     statistics: container.statisticsVM,
+                    speed: container.speedVM,
                     navigation: container.navigation
                 )
                 .environmentObject(updater)
@@ -293,6 +295,34 @@ enum SnapshotRunner {
             width: 880
         ))
 
+        // MARK: Speed (full view. No height is offered here, so the tab's pinned header, chart
+        // and column headings take their full size and the table under them is as tall as its
+        // rows: the column headings appear once, above the table, and every row is in the
+        // image. The page colour goes behind the whole surface, as it does for `usage`, because
+        // the pinned region draws its own `Palette.bg` backdrop — over the capture's neutral
+        // grey that backdrop would read as a band.)
+        surfaces.append(Surface(
+            name: "speed",
+            view: AnyView(
+                SpeedView(model: container.speedVM, topInset: Spacing.xl)
+                    .background(Palette.bg)
+            ),
+            width: 880
+        ))
+
+        // MARK: Speed, comparing (the first three groups charted together, with the pointer on
+        // the last plotted day: the tooltip at the chart's right edge is the state the chart
+        // card used to clip, so every run renders it)
+        surfaces.append(Surface(
+            name: "speed-compare",
+            view: AnyView(
+                SpeedView(model: container.speedVM, topInset: Spacing.xl, initialComparison: 3,
+                          initialHoverOnLastDay: true)
+                    .background(Palette.bg)
+            ),
+            width: 880
+        ))
+
         // MARK: Gallery (design-system component gallery — no view model, no scenario data)
 
         surfaces.append(Surface(
@@ -357,6 +387,7 @@ enum SnapshotRunner {
                     accounts: onboardingContainer.accountsVM,
                     codexAccounts: onboardingContainer.codexAccountsVM,
                     statistics: onboardingContainer.statisticsVM,
+                    speed: onboardingContainer.speedVM,
                     navigation: onboardingContainer.navigation
                 )
                 .environmentObject(updater)

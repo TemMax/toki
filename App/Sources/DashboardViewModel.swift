@@ -170,10 +170,12 @@ final class DashboardViewModel {
             await self.indexer.startWatching()
             // Live analytics: when the watcher indexes new transcript records (debounced
             // ~1s), quietly reload the summary so usage grows on screen while you work.
-            await self.indexer.setOnIndexChanged { [weak self] in
+            await self.indexer.setOnIndexChanged { @MainActor [weak self] in
                 await self?.refreshAnalytics()
+                self?.onIndexContentChanged?()
             }
             self.isIndexing = false
+            self.onIndexContentChanged?()
             self.indexProgress = nil
             // Only a completed pass opens the statistics gate: a first-run import from a
             // half-built index would leave older days permanently short.
@@ -208,6 +210,11 @@ final class DashboardViewModel {
     /// half-built index (the statistics rollup) know the index is complete.
     var onInitialIndexFinished: (() -> Void)?
 
+    /// Told whenever the index's contents may have changed — a committed catch-up batch, the
+    /// end of a pass, a watcher batch — so another owner of index-derived data (the speed
+    /// report) can refresh without registering a second indexer callback.
+    var onIndexContentChanged: (() -> Void)?
+
     /// Floor between the reloads a running catch-up triggers: often enough that the numbers
     /// visibly fill in, rarely enough that a cold build is not spent re-aggregating.
     private static let progressiveReloadInterval: Duration = .milliseconds(700)
@@ -217,6 +224,7 @@ final class DashboardViewModel {
     private func indexDidProgress(_ progress: IndexProgress) {
         guard isIndexing else { return }
         indexProgress = progress
+        onIndexContentChanged?()
         guard isVisible, !progressiveReloadInFlight, progress.filesDone > 0 else { return }
         if let last = lastProgressiveReload, ContinuousClock.now - last < Self.progressiveReloadInterval {
             return

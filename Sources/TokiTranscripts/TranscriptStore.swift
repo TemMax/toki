@@ -37,7 +37,10 @@ public final class TranscriptStore {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        // No per-call mutex: the owner already serialises the connection (see the type's
+        // documentation), and SQLite's own lock around every `step` and `column_*` call was
+        // 8% of the speed query's time per row.
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX
         let rc = sqlite3_open_v2(databaseURL.path, &handle, flags, nil)
         guard rc == SQLITE_OK, let handle else {
             let msg = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
@@ -104,7 +107,10 @@ public final class TranscriptStore {
             last_known_size INTEGER NOT NULL,
             inode INTEGER NOT NULL,
             device INTEGER NOT NULL,
-            last_event_id INTEGER NOT NULL
+            last_event_id INTEGER NOT NULL,
+            last_input_ms INTEGER,
+            open_request_id TEXT,
+            open_request_start_ms INTEGER
         );
         """)
 
@@ -123,7 +129,10 @@ public final class TranscriptStore {
             web_search INTEGER NOT NULL,
             web_fetch INTEGER NOT NULL,
             is_sidechain INTEGER NOT NULL,
-            billing INTEGER NOT NULL DEFAULT 0
+            billing INTEGER NOT NULL DEFAULT 0,
+            generation_ms INTEGER,
+            effort TEXT,
+            fast INTEGER NOT NULL DEFAULT 0
         );
         """)
 
@@ -140,7 +149,10 @@ public final class TranscriptStore {
             model TEXT NOT NULL,
             ordinal INTEGER NOT NULL,
             saw_usage_record INTEGER NOT NULL DEFAULT 0,
-            last_count_total INTEGER NOT NULL DEFAULT 0
+            last_count_total INTEGER NOT NULL DEFAULT 0,
+            anchor_ms INTEGER,
+            effort TEXT,
+            fast INTEGER NOT NULL DEFAULT 0
         );
         """)
 
@@ -149,6 +161,27 @@ public final class TranscriptStore {
         try addColumnIfMissing("entries", "billing INTEGER NOT NULL DEFAULT 0")
         try addColumnIfMissing("codex_parse_context", "saw_usage_record INTEGER NOT NULL DEFAULT 0")
         try addColumnIfMissing("codex_parse_context", "last_count_total INTEGER NOT NULL DEFAULT 0")
+        try addColumnIfMissing("entries", "generation_ms INTEGER")
+        try addColumnIfMissing("entries", "effort TEXT")
+        try addColumnIfMissing("entries", "fast INTEGER NOT NULL DEFAULT 0")
+        try addColumnIfMissing("file_state", "last_input_ms INTEGER")
+        try addColumnIfMissing("file_state", "open_request_id TEXT")
+        try addColumnIfMissing("file_state", "open_request_start_ms INTEGER")
+        try addColumnIfMissing("codex_parse_context", "anchor_ms INTEGER")
+        try addColumnIfMissing("codex_parse_context", "effort TEXT")
+        try addColumnIfMissing("codex_parse_context", "fast INTEGER NOT NULL DEFAULT 0")
+
+        // Serves `speedSamples()` alone: partial, so it holds only measurable rows, and in the
+        // report's order, so the query needs neither the table nor a sort. `speedSamplesSQL`
+        // repeats `speedIndexPredicate` verbatim, or SQLite will not use it. Its name carries
+        // every limit, so a changed limit drops the old index and builds the new one, instead
+        // of leaving `INDEXED BY` naming an index whose `WHERE` the query no longer implies.
+        try dropSpeedIndexes(except: Self.speedIndexName)
+        try exec("""
+        CREATE INDEX IF NOT EXISTS \(Self.speedIndexName)
+        ON entries(model, effort, fast, timestamp_ms, output_tokens, generation_ms)
+        WHERE \(Self.speedIndexPredicate);
+        """)
 
         try exec("""
         CREATE TABLE IF NOT EXISTS meta (
@@ -156,6 +189,42 @@ public final class TranscriptStore {
             value TEXT NOT NULL
         );
         """)
+    }
+
+    /// The speed index, named after the limits it was built with.
+    static let speedIndexName = """
+    idx_entries_speed_\(SpeedSampleFilter.minOutputTokens)_\
+    \(SpeedSampleFilter.minGenerationMs)_\(SpeedSampleFilter.maxGenerationMs)
+    """
+
+    /// Which rows the speed index holds. The speed query's `WHERE` is exactly this, so the
+    /// query implies the index's `WHERE` and SQLite need not re-test these terms per row.
+    static let speedIndexPredicate = """
+    generation_ms IS NOT NULL AND output_tokens >= \(SpeedSampleFilter.minOutputTokens) \
+    AND generation_ms > \(SpeedSampleFilter.minGenerationMs) \
+    AND generation_ms <= \(SpeedSampleFilter.maxGenerationMs)
+    """
+
+    /// Drops every speed index but `keep`: one built for other limits (or before the name
+    /// carried them).
+    private func dropSpeedIndexes(except keep: String) throws {
+        var stale: [String] = []
+        do {
+            let stmt = try prepare("""
+            SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_entries_speed%';
+            """)
+            defer { sqlite3_finalize(stmt) }
+            while true {
+                let rc = sqlite3_step(stmt)
+                if rc == SQLITE_DONE { break }
+                guard rc == SQLITE_ROW else { throw TranscriptStoreError.stepFailed(rc, errMsg()) }
+                let name = columnText(stmt, 0)
+                if name != keep { stale.append(name) }
+            }
+        }
+        for name in stale {
+            try exec("DROP INDEX IF EXISTS \"\(name.replacingOccurrences(of: "\"", with: "\"\""))\";")
+        }
     }
 
     // MARK: - Low-level helpers
@@ -256,13 +325,18 @@ public final class TranscriptStore {
             // same as last-wins; across files — forked subagent transcripts copy a request's
             // id together with an earlier snapshot of it — it stops the result depending on
             // which file the (parallel) pass happened to commit last.
+            // Duration follows the usage rule above, with two additions that keep it
+            // order-independent: a snapshot with no anchor never erases a measured duration,
+            // and between snapshots of the same size the longer one wins — a request whose
+            // blocks straddle two catch-up reads is re-measured to its later last block.
             stmt = try prepare("""
             INSERT INTO entries
                 (request_id, session_id, cwd, model, timestamp_ms,
                  input_tokens, output_tokens, cache_read_tokens,
                  ephemeral_5m_tokens, ephemeral_1h_tokens,
-                 web_search, web_fetch, is_sidechain, billing)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 web_search, web_fetch, is_sidechain, billing,
+                 generation_ms, effort, fast)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(request_id) DO UPDATE SET
                 session_id = excluded.session_id, cwd = excluded.cwd, model = excluded.model,
                 timestamp_ms = excluded.timestamp_ms, input_tokens = excluded.input_tokens,
@@ -270,7 +344,15 @@ public final class TranscriptStore {
                 ephemeral_5m_tokens = excluded.ephemeral_5m_tokens,
                 ephemeral_1h_tokens = excluded.ephemeral_1h_tokens,
                 web_search = excluded.web_search, web_fetch = excluded.web_fetch,
-                is_sidechain = excluded.is_sidechain, billing = excluded.billing
+                is_sidechain = excluded.is_sidechain, billing = excluded.billing,
+                generation_ms = CASE
+                    WHEN excluded.generation_ms IS NULL THEN entries.generation_ms
+                    WHEN entries.generation_ms IS NULL THEN excluded.generation_ms
+                    WHEN excluded.output_tokens > entries.output_tokens THEN excluded.generation_ms
+                    ELSE MAX(excluded.generation_ms, entries.generation_ms)
+                END,
+                effort = COALESCE(excluded.effort, entries.effort),
+                fast = excluded.fast
             WHERE excluded.output_tokens >= entries.output_tokens;
             """)
             insertEntryStatement = stmt
@@ -292,6 +374,13 @@ public final class TranscriptStore {
             sqlite3_bind_int64(stmt, 12, Int64(record.usage.webFetch))
             sqlite3_bind_int64(stmt, 13, record.isSidechain ? 1 : 0)
             sqlite3_bind_int64(stmt, 14, Int64(record.billing.rawValue))
+            if let ms = record.generationMs {
+                sqlite3_bind_int64(stmt, 15, Int64(ms))
+            } else {
+                sqlite3_bind_null(stmt, 15)
+            }
+            if let effort = record.effort { bindText(stmt, 16, effort) } else { sqlite3_bind_null(stmt, 16) }
+            sqlite3_bind_int64(stmt, 17, record.isFast ? 1 : 0)
 
             let rc = sqlite3_step(stmt)
             guard rc == SQLITE_DONE else {
@@ -326,11 +415,76 @@ public final class TranscriptStore {
         return try readRecords(stmt)
     }
 
+    static let speedSamplesSQL = """
+    SELECT model, effort, fast, timestamp_ms, output_tokens, generation_ms
+    FROM entries INDEXED BY \(speedIndexName)
+    WHERE \(speedIndexPredicate)
+    ORDER BY model, effort, fast, timestamp_ms;
+    """
+
+    /// Every measurable request, as columns, in group-then-time order: one statement over the
+    /// speed index, so one snapshot without a transaction. Rows arrive grouped; each row's
+    /// group columns are compared with the previous row's bytes where SQLite holds them, and a
+    /// `String` is made only when the group changes.
+    public func speedSamples() throws -> SpeedSamples {
+        var out = SpeedSamples.empty
+        let stmt = try prepare(Self.speedSamplesSQL)
+        defer { sqlite3_finalize(stmt) }
+
+        // The current group's key, copied out of SQLite once per group.
+        var model: [UInt8] = []
+        var effort: [UInt8]? = nil
+        var fast: Int64 = 0
+        var index: UInt16 = 0
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else { throw TranscriptStoreError.stepFailed(rc, errMsg()) }
+
+            // `_text` before `_bytes`, as SQLite asks; a NULL value has a nil pointer.
+            let modelText = sqlite3_column_text(stmt, 0)
+            let modelCount = Int(sqlite3_column_bytes(stmt, 0))
+            let effortText = sqlite3_column_text(stmt, 1)
+            let effortCount = Int(sqlite3_column_bytes(stmt, 1))
+            let rowFast = sqlite3_column_int64(stmt, 2)
+            if out.groups.isEmpty || rowFast != fast
+                || !Self.bytes(modelText, modelCount, equal: model)
+                || !Self.bytes(effortText, effortCount, equal: effort) {
+                model = Self.copy(modelText, modelCount) ?? []
+                effort = Self.copy(effortText, effortCount)
+                fast = rowFast
+                index = UInt16(clamping: out.groups.count)
+                out.groups.append(SpeedSampleGroup(
+                    model: String(decoding: model, as: UTF8.self),
+                    effort: effort.map { String(decoding: $0, as: UTF8.self) },
+                    isFast: rowFast != 0))
+            }
+            out.group.append(index)
+            out.timestampMs.append(sqlite3_column_int64(stmt, 3))
+            out.outputTokens.append(Int32(clamping: sqlite3_column_int64(stmt, 4)))
+            out.generationMs.append(Int32(clamping: sqlite3_column_int64(stmt, 5)))
+        }
+        return out
+    }
+
+    /// Whether a column's bytes (`nil` for NULL) equal `key` (`nil` for NULL).
+    private static func bytes(_ text: UnsafePointer<UInt8>?, _ count: Int, equal key: [UInt8]?) -> Bool {
+        guard let text, let key else { return text == nil && key == nil }
+        guard count == key.count else { return false }
+        if count == 0 { return true }
+        return key.withUnsafeBufferPointer { memcmp(text, $0.baseAddress, count) == 0 }
+    }
+
+    private static func copy(_ text: UnsafePointer<UInt8>?, _ count: Int) -> [UInt8]? {
+        text.map { Array(UnsafeBufferPointer(start: $0, count: count)) }
+    }
+
     private let entrySelectSQL = """
     SELECT request_id, session_id, cwd, model, timestamp_ms,
            input_tokens, output_tokens, cache_read_tokens,
            ephemeral_5m_tokens, ephemeral_1h_tokens,
-           web_search, web_fetch, is_sidechain, billing
+           web_search, web_fetch, is_sidechain, billing,
+           generation_ms, effort, fast
     FROM entries
     """
 
@@ -362,7 +516,11 @@ public final class TranscriptStore {
                     timestamp: Date(timeIntervalSince1970: Double(timestampMs) / 1000.0),
                     usage: usage,
                     isSidechain: isSidechain,
-                    billing: BillingModifiers(rawValue: Int(sqlite3_column_int64(stmt, 13)))
+                    billing: BillingModifiers(rawValue: Int(sqlite3_column_int64(stmt, 13))),
+                    generationMs: sqlite3_column_type(stmt, 14) == SQLITE_NULL
+                        ? nil : Int(sqlite3_column_int64(stmt, 14)),
+                    effort: sqlite3_column_type(stmt, 15) == SQLITE_NULL ? nil : columnText(stmt, 15),
+                    isFast: sqlite3_column_int64(stmt, 16) != 0
                 ))
             } else if rc == SQLITE_DONE {
                 break
@@ -379,8 +537,9 @@ public final class TranscriptStore {
     public func upsertFileState(_ state: FileIndexState) throws {
         let sql = """
         INSERT OR REPLACE INTO file_state
-            (path, last_byte_offset, last_known_size, inode, device, last_event_id)
-        VALUES (?,?,?,?,?,?);
+            (path, last_byte_offset, last_known_size, inode, device, last_event_id, last_input_ms,
+             open_request_id, open_request_start_ms)
+        VALUES (?,?,?,?,?,?,?,?,?);
         """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -390,6 +549,9 @@ public final class TranscriptStore {
         sqlite3_bind_int64(stmt, 4, Int64(bitPattern: state.inode))
         sqlite3_bind_int64(stmt, 5, Int64(bitPattern: state.device))
         sqlite3_bind_int64(stmt, 6, Int64(bitPattern: state.lastEventId))
+        if let ms = state.lastInputMs { sqlite3_bind_int64(stmt, 7, ms) } else { sqlite3_bind_null(stmt, 7) }
+        if let id = state.openRequestId { bindText(stmt, 8, id) } else { sqlite3_bind_null(stmt, 8) }
+        if let ms = state.openRequestStartMs { sqlite3_bind_int64(stmt, 9, ms) } else { sqlite3_bind_null(stmt, 9) }
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else { throw TranscriptStoreError.stepFailed(rc, errMsg()) }
     }
@@ -397,7 +559,8 @@ public final class TranscriptStore {
     /// Returns the persisted index state for `path`, or `nil` when none exists.
     public func fileState(path: String) throws -> FileIndexState? {
         let sql = """
-        SELECT path, last_byte_offset, last_known_size, inode, device, last_event_id
+        SELECT path, last_byte_offset, last_known_size, inode, device, last_event_id, last_input_ms,
+               open_request_id, open_request_start_ms
         FROM file_state WHERE path = ?;
         """
         let stmt = try prepare(sql)
@@ -411,7 +574,10 @@ public final class TranscriptStore {
                 lastKnownSize: UInt64(bitPattern: sqlite3_column_int64(stmt, 2)),
                 inode: UInt64(bitPattern: sqlite3_column_int64(stmt, 3)),
                 device: UInt64(bitPattern: sqlite3_column_int64(stmt, 4)),
-                lastEventId: UInt64(bitPattern: sqlite3_column_int64(stmt, 5))
+                lastEventId: UInt64(bitPattern: sqlite3_column_int64(stmt, 5)),
+                lastInputMs: sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 6),
+                openRequestId: sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : columnText(stmt, 7),
+                openRequestStartMs: sqlite3_column_type(stmt, 8) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 8)
             )
         } else if rc == SQLITE_DONE {
             return nil
@@ -424,7 +590,8 @@ public final class TranscriptStore {
     /// instead of one per file.
     public func allFileStates() throws -> [String: FileIndexState] {
         let stmt = try prepare("""
-        SELECT path, last_byte_offset, last_known_size, inode, device, last_event_id
+        SELECT path, last_byte_offset, last_known_size, inode, device, last_event_id, last_input_ms,
+               open_request_id, open_request_start_ms
         FROM file_state;
         """)
         defer { sqlite3_finalize(stmt) }
@@ -438,7 +605,10 @@ public final class TranscriptStore {
                     lastKnownSize: UInt64(bitPattern: sqlite3_column_int64(stmt, 2)),
                     inode: UInt64(bitPattern: sqlite3_column_int64(stmt, 3)),
                     device: UInt64(bitPattern: sqlite3_column_int64(stmt, 4)),
-                    lastEventId: UInt64(bitPattern: sqlite3_column_int64(stmt, 5))
+                    lastEventId: UInt64(bitPattern: sqlite3_column_int64(stmt, 5)),
+                lastInputMs: sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 6),
+                openRequestId: sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : columnText(stmt, 7),
+                openRequestStartMs: sqlite3_column_type(stmt, 8) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 8)
                 )
                 out[state.path] = state
             } else if rc == SQLITE_DONE {
@@ -454,8 +624,9 @@ public final class TranscriptStore {
     public func upsertCodexContext(_ context: CodexParseContext, path: String) throws {
         let stmt = try prepare("""
         INSERT OR REPLACE INTO codex_parse_context
-            (path, session_id, cwd, model, ordinal, saw_usage_record, last_count_total)
-        VALUES (?,?,?,?,?,?,?);
+            (path, session_id, cwd, model, ordinal, saw_usage_record, last_count_total,
+             anchor_ms, effort, fast)
+        VALUES (?,?,?,?,?,?,?,?,?,?);
         """)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, path)
@@ -465,6 +636,9 @@ public final class TranscriptStore {
         sqlite3_bind_int64(stmt, 5, Int64(context.ordinal))
         sqlite3_bind_int64(stmt, 6, context.sawUsageRecord ? 1 : 0)
         sqlite3_bind_int64(stmt, 7, Int64(context.lastCountTotal))
+        if let ms = context.anchorMs { sqlite3_bind_int64(stmt, 8, ms) } else { sqlite3_bind_null(stmt, 8) }
+        if let effort = context.effort { bindText(stmt, 9, effort) } else { sqlite3_bind_null(stmt, 9) }
+        sqlite3_bind_int64(stmt, 10, context.isFast ? 1 : 0)
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else { throw TranscriptStoreError.stepFailed(rc, errMsg()) }
     }
@@ -472,7 +646,8 @@ public final class TranscriptStore {
     /// Every persisted Codex parse context, keyed by rollout path.
     public func allCodexContexts() throws -> [String: CodexParseContext] {
         let stmt = try prepare("""
-        SELECT path, session_id, cwd, model, ordinal, saw_usage_record, last_count_total
+        SELECT path, session_id, cwd, model, ordinal, saw_usage_record, last_count_total,
+               anchor_ms, effort, fast
         FROM codex_parse_context;
         """)
         defer { sqlite3_finalize(stmt) }
@@ -486,7 +661,10 @@ public final class TranscriptStore {
                     model: columnText(stmt, 3),
                     ordinal: Int(sqlite3_column_int64(stmt, 4)),
                     sawUsageRecord: sqlite3_column_int64(stmt, 5) != 0,
-                    lastCountTotal: Int(sqlite3_column_int64(stmt, 6))
+                    lastCountTotal: Int(sqlite3_column_int64(stmt, 6)),
+                    anchorMs: sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 7),
+                    effort: sqlite3_column_type(stmt, 8) == SQLITE_NULL ? nil : columnText(stmt, 8),
+                    isFast: sqlite3_column_int64(stmt, 9) != 0
                 )
             } else if rc == SQLITE_DONE {
                 return out

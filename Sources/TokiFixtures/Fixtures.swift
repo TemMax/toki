@@ -71,7 +71,8 @@ public enum Fixtures {
             identity: identity,
             accounts: [account],
             instances: makeInstances(now: now, count: 2),
-            environment: makeEnvironment()
+            environment: makeEnvironment(),
+            speed: SpeedFixtures.report(now: now, groups: 6)
         )
     }
 
@@ -141,7 +142,8 @@ public enum Fixtures {
             accounts: accounts,
             quarantine: quarantine,
             instances: makeInstances(now: now, count: 2),
-            environment: makeEnvironment()
+            environment: makeEnvironment(),
+            speed: SpeedFixtures.report(now: now, groups: 6)
         )
     }
 
@@ -248,7 +250,8 @@ public enum Fixtures {
             identity: identity,
             accounts: [account],
             instances: makeInstances(now: now, count: 3),
-            environment: makeEnvironment()
+            environment: makeEnvironment(),
+            speed: SpeedFixtures.report(now: now, groups: 13)
         )
     }
 
@@ -311,7 +314,8 @@ public enum Fixtures {
             identity: identity,
             accounts: [account],
             instances: .empty,
-            environment: .empty
+            environment: .empty,
+            speed: .empty
         )
     }
 

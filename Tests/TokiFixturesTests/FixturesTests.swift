@@ -248,4 +248,18 @@ struct FixturesTests {
             #expect(Fixtures.bundle(for: scenario, now: Self.fixedNow).limits?.claudeResets == nil)
         }
     }
+
+    @Test("Speed fixtures: populated scenarios have a 30-day series, empty has none")
+    func speedFixtures() throws {
+        let now = Date(timeIntervalSince1970: 1_790_935_200)
+        let single = try #require(Fixtures.bundle(for: .singleAccount, now: now).speed)
+        #expect(single.groups.count >= 4)
+        #expect(single.groups.contains { $0.provider == .codex })
+        #expect(single.groups.contains { $0.isFast })
+        #expect(single.groups[0].daily.count >= 25)            // a few gap days, by design
+        #expect(single.hiddenGroupCount == 1)
+        #expect((Fixtures.bundle(for: .heavy, now: now).speed?.groups.count ?? 0) >= 12)
+        #expect(Fixtures.bundle(for: .empty, now: now).speed == .empty)
+        #expect(Fixtures.bundle(for: .fresh, now: now).speed == nil)
+    }
 }

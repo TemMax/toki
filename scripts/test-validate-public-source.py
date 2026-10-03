@@ -102,6 +102,19 @@ SUFeedURL: https://github.com/TemMax/toki/releases/latest/download/appcast.xml
         with self.assertRaisesRegex(ValueError, "release notes"):
             self.validate()
 
+    def test_private_document_reference_in_source_is_rejected(self) -> None:
+        self.write("CONTRIBUTING.md", "See docs/performance/x.md and CLAUDE.md.\n")
+        self.validate()
+        for text in ("// see `docs/performance/x.md`\n", "/// per claude.md section 5\n", "// AGENTS.md rules\n"):
+            self.write("Sources/Feature.swift", text)
+            with self.assertRaisesRegex(ValueError, "reference to a private document in public source: Sources/Feature.swift"):
+                self.validate()
+
+    def test_non_utf8_source_is_skipped(self) -> None:
+        (self.root / "Tests").mkdir()
+        (self.root / "Tests/blob.bin").write_bytes(b"\xff\xfe CLAUDE.md")
+        self.validate()
+
     def test_wrong_version_or_build_fails(self) -> None:
         self.write("project.yml", (self.root / "project.yml").read_text().replace("1.13.0", "1.12.1"))
         with self.assertRaisesRegex(ValueError, "MARKETING_VERSION"):

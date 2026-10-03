@@ -12,7 +12,7 @@ private let log = TokiLog.logger("transcripts")
 /// Every file's read position is persisted, so both the launch catch-up (`reindex()`) and the
 /// `FSEventStream` watcher only ever read what was appended since the last pass. The actor owns
 /// the write connection and all mutable state; reads use a separate connection (`IndexReader`).
-public actor TranscriptIndexer: RecordProviding {
+public actor TranscriptIndexer: RecordProviding, SpeedSampleProviding {
     /// The opened SQLite store, or `nil` until a lazy open succeeds.
     /// All store-dependent paths route through `requireStore()`.
     private var store: TranscriptStore?
@@ -162,7 +162,10 @@ public actor TranscriptIndexer: RecordProviding {
     /// file once. Version 2: the parallel byte-level catch-up (earlier indexes could hold a
     /// read position past a line that was still being written). Version 3: Claude billing
     /// modifiers (fast mode, US-only inference) and Codex `token_count` fallback usage.
-    static let indexFormatVersion = "3"
+    /// Version 4: per-request generation time, effort and fast mode (Claude start anchors,
+    /// Codex input anchors). Version 5: Claude requests start at the last user line only
+    /// (attachments are written after the request is sent).
+    static let indexFormatVersion = "5"
     private static let indexFormatKey = "index_format"
 
     /// The in-flight catch-up, shared by concurrent callers.
@@ -298,20 +301,14 @@ public actor TranscriptIndexer: RecordProviding {
         do {
             switch job.kind {
             case .claude:
-                var records: [TranscriptRecord] = []
-                var slot: [String: Int] = [:]
-                let result = try LineScanner.scan(path: job.path, from: job.startOffset) { line, _ in
-                    guard let record = TranscriptParser.parse(bytes: line) else { return }
-                    // Last-wins per requestId (D2): a streamed response is written several
-                    // times with growing usage, and only its final line counts.
-                    if let index = slot[record.requestId] {
-                        records[index] = record
-                    } else {
-                        slot[record.requestId] = records.count
-                        records.append(record)
-                    }
+                var scan = ClaudeScan(lastInputMs: job.lastInputMs, openRequestId: job.openRequestId,
+                                      openRequestStartMs: job.openRequestStartMs)
+                let result = try LineScanner.scan(path: job.path, from: job.startOffset) { line, isComplete in
+                    scan.consume(line, isComplete: isComplete)
                 }
-                return IndexedFile(records: records, state: job.state(after: result))
+                return IndexedFile(records: scan.finish(), state: job.state(
+                    after: result, lastInputMs: scan.lastInputMs,
+                    openRequestId: scan.openRequestId, openRequestStartMs: scan.openRequestStartMs))
             case .codex:
                 var scan = CodexScan(context: job.context)
                 let result = try LineScanner.scan(path: job.path, from: job.startOffset) { line, isComplete in
@@ -567,6 +564,12 @@ public actor TranscriptIndexer: RecordProviding {
     /// Returns deduplicated records whose timestamp falls in [start, end].
     public nonisolated func records(start: Date, end: Date) async throws -> [TranscriptRecord] {
         try reader.read { try $0.records(start: start, end: end) }
+    }
+
+    /// Every measurable request for the generation speed report — through the read
+    /// connection, so it never waits for an index pass.
+    public nonisolated func speedSamples() async throws -> SpeedSamples {
+        try reader.read { try $0.speedSamples() }
     }
 
     // MARK: - File enumeration

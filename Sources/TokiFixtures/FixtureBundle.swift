@@ -27,6 +27,7 @@ public struct FixtureBundle: Sendable {
     public let instances: ClaudeInstancesSnapshot?
     public let environment: ClaudeEnvironment?
     public let serviceStatus: ServiceStatus
+    public let speed: GenerationSpeedReport?
 
     public init(
         limits: UsageLimits? = nil,
@@ -38,7 +39,8 @@ public struct FixtureBundle: Sendable {
         quarantine: [QuarantineEntry] = [],
         instances: ClaudeInstancesSnapshot? = nil,
         environment: ClaudeEnvironment? = nil,
-        serviceStatus: ServiceStatus = .operational
+        serviceStatus: ServiceStatus = .operational,
+        speed: GenerationSpeedReport? = nil
     ) {
         self.limits = limits
         self.limitsState = limitsState
@@ -50,5 +52,6 @@ public struct FixtureBundle: Sendable {
         self.instances = instances
         self.environment = environment
         self.serviceStatus = serviceStatus
+        self.speed = speed
     }
 }

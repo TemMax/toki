@@ -20,6 +20,10 @@ REQUIRED = (
     "App/Resources/Credits.html",
 )
 IGNORED_ROOTS = {".git", ".build", "build", "DerivedData", ".context", "__pycache__"}
+SOURCE_ROOTS = {"app", "sources", "tests", "benchmarks"}
+PRIVATE_REFERENCE = re.compile(
+    rb"docs/(?:performance|superpowers|research)/|claude\.md|agents\.md", re.IGNORECASE
+)
 SEMVER = r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
 
 
@@ -75,6 +79,14 @@ def validate_tree(root: Path, version: str, build: int) -> None:
                 raise ValueError(f"private docs in public source: {relative}")
             if path.is_symlink():
                 raise ValueError(f"symlink in public source: {relative}")
+            if parts[0] in SOURCE_ROOTS and path.is_file():
+                data = path.read_bytes()
+                try:
+                    data.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if PRIVATE_REFERENCE.search(data):
+                    raise ValueError(f"reference to a private document in public source: {relative}")
             if len(parts) > 2 and parts[:2] == ("docs", "release-notes") and relative != notes.relative_to(root):
                 raise ValueError(f"unrelated release notes in public source: {relative}")
 

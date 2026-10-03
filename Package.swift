@@ -210,6 +210,15 @@ let package = Package(
             path: "Benchmarks/IndexBench"
         ),
 
+        // Hand-run generation-speed harness (see Benchmarks/SpeedBench): the speed sample
+        // query plus the report build, on a real index copy and on a synthetic 2M rows.
+        .executableTarget(
+            name: "SpeedBench",
+            dependencies: ["TokiModels", "TokiTranscripts", "TokiAnalytics"],
+            path: "Benchmarks/SpeedBench",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+
         // Deterministic named mock-data scenarios (fresh/multi-account/near-limit/…), shared
         // by the snapshot harness, a debug control channel, and tests. Dev-only: intentionally
         // NOT a dependency of the TokiCore umbrella target, so it never ships inside the app.
