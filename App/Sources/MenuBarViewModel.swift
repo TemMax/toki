@@ -125,19 +125,8 @@ final class MenuBarViewModel {
 
     // MARK: Derived
 
-    /// True when the account is *currently* on extra usage — extra usage enabled and an
-    /// included window (5-hour or 7-day) maxed out, so further usage spills into extra. Keyed
-    /// on live limit state, not `extra.utilization` (a monthly counter that would otherwise
-    /// leave the indicator stuck after dropping back under the limits).
-    var isExtraUsageActive: Bool {
-        guard let extra = limits?.extra, extra.isEnabled else { return false }
-        let fiveHourMaxed = (limits?.fiveHour?.utilization ?? 0) >= 1.0
-        let sevenDayMaxed = (limits?.sevenDay?.utilization ?? 0) >= 1.0
-        return fiveHourMaxed || sevenDayMaxed
-    }
-
     /// The configured indicator list, resolved against live data — what the status item draws
-    /// in normal mode. `MenuBarLayout` is pure, so this recomputes from the two owning stores
+    /// at all times. `MenuBarLayout` is pure, so this recomputes from the two owning stores
     /// (`configurationState`, `live`) rather than caching a third copy of either.
     var resolvedIndicators: [ResolvedIndicator] {
         let visible = configuration.indicators.filter { availableProviders.contains($0.provider) }
@@ -163,20 +152,6 @@ final class MenuBarViewModel {
             claudeLimits: limits,
             codexLimits: codexLimits
         )
-    }
-
-    /// The single extra-usage indicator — what the status item draws instead of
-    /// `resolvedIndicators` while `isExtraUsageActive`. Built through the same
-    /// `MenuBarLayout.resolve` entry point every other indicator goes through (a throwaway
-    /// one-entry configuration; `MenuBarConfiguration` never rejects a non-empty list), so
-    /// availability/fraction handling for the extra-usage window has exactly one
-    /// implementation, not a second hand-rolled one here.
-    var extraUsageIndicator: ResolvedIndicator {
-        let single = MenuBarConfiguration(
-            indicators: [MenuBarIndicator(window: .extraUsage, rendering: .number)]
-        )
-        return MenuBarLayout.resolve(single, against: limits).first
-            ?? ResolvedIndicator(title: "Extra", fraction: nil, rendering: .number, isUnavailable: true)
     }
 
     // MARK: Lifecycle (delegated to the shared store)

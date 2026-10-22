@@ -438,17 +438,13 @@ enum DebugControlChannel {
         }
         if surface == .menuBarStrip {
             let menuBar = container.menuBarVM
-            let indicators = menuBar.isExtraUsageActive
-                ? [menuBar.extraUsageIndicator]
-                : menuBar.resolvedIndicators
             // The real production view — the exact rasterized, template `NSImage` `MenuBarLabel`
             // hands `MenuBarExtra`, not a re-derivation of it — so this surface proves both the
             // live-data wiring AND the template image itself, not just the pre-rasterization
             // shapes.
             return AnyView(
                 MenuBarLabel(
-                    indicators: indicators,
-                    isExtraUsage: menuBar.isExtraUsageActive,
+                    indicators: menuBar.resolvedIndicators,
                     style: menuBar.configuration.style
                 )
                 .padding(Spacing.sm)
