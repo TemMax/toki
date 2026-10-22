@@ -18,7 +18,7 @@
   },
   "runner": {
     "label": "macos-26",
-    "imageVersion": "20260907.0351.1",
+    "imageVersion": "20261013.0424.1",
     "osVersion": "26.6.2"
   }
 }
