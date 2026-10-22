@@ -413,14 +413,13 @@ struct GalleryView: View {
                     .padding(.vertical, Spacing.xxs)
                     .background(Palette.card)
                 }
-                Specimen("extra-usage variant") {
+                Specimen("extra usage indicator") {
                     MenuBarLabel(
                         indicators: [
                             ResolvedIndicator(
                                 title: "Extra", fraction: 0.63, rendering: .number, isUnavailable: false
                             ),
-                        ],
-                        isExtraUsage: true
+                        ]
                     )
                     .padding(.horizontal, Spacing.sm)
                     .padding(.vertical, Spacing.xxs)

@@ -1,11 +1,8 @@
 /// The configurable, ordered list of indicators drawn in the macOS status item.
 ///
-/// Today the status item shows a single number (5-hour utilisation, or the
-/// extra-usage percentage while extra usage is active). Reading the 7-day window or
-/// the per-model weekly window requires opening the popover. This module makes
-/// which windows are shown, in what order, and how each is drawn a first-class,
-/// testable configuration — `App/Sources` only draws what `MenuBarLayout.resolve`
-/// hands it.
+/// This module makes which windows are shown, in what order, and how each is drawn a
+/// first-class, testable configuration — `App/Sources` only draws what
+/// `MenuBarLayout.resolve` hands it.
 import Foundation
 import TokiModels
 

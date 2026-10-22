@@ -161,12 +161,7 @@ private struct MenuBarLabelHost: View {
         Group {
             if container.providerAvailability.hasAnyProvider {
                 MenuBarLabel(
-                    indicators: container.providerAvailability.claudeCode
-                        && container.menuBarVM.isExtraUsageActive
-                        ? [container.menuBarVM.extraUsageIndicator]
-                        : container.menuBarVM.resolvedIndicators,
-                    isExtraUsage: container.providerAvailability.claudeCode
-                        && container.menuBarVM.isExtraUsageActive,
+                    indicators: container.menuBarVM.resolvedIndicators,
                     style: container.menuBarVM.configuration.style
                 )
             } else {
