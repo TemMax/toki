@@ -189,7 +189,7 @@ struct AccountsView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .imageScale(.small)
                         .foregroundStyle(Palette.warn)
-                    Text(staleBannerText(account.staleReason))
+                    Text(staleBannerText(account.staleReason, fetchedAt: account.fetchedAt))
                         .textStyle(.caption)
                 }
                 .foregroundStyle(Palette.warn)
@@ -228,6 +228,8 @@ struct AccountsView: View {
                     )
                 }
             }
+            // Stale gauges keep their last-known values, dimmed so they don't read as live.
+            .opacity(account.gaugesAreStale ? 0.55 : 1)
         }
         .padding(Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -320,12 +322,14 @@ struct AccountsView: View {
         }
     }
 
-    private func staleBannerText(_ reason: GaugeStaleReason?) -> String {
-        switch reason {
-        case .auth: "Usage unavailable — token couldn't be renewed"
+    private func staleBannerText(_ reason: GaugeStaleReason?, fetchedAt: Date?) -> String {
+        let base = switch reason {
+        case .auth: fetchedAt == nil ? "Usage unavailable — token couldn't be renewed" : "Token couldn't be renewed"
         case .rateLimited: "Usage rate-limited — will retry"
         case .network, nil: "Usage temporarily unavailable"
         }
+        guard let fetchedAt else { return base }
+        return "\(base) · showing data from \(lastActiveText(fetchedAt))"
     }
 
     private func commitRename(_ account: AccountPresentation) {

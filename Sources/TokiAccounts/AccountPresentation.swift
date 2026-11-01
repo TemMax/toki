@@ -19,7 +19,8 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
     public let label: String
     public let isActive: Bool
     public let health: AccountHealth
-    /// Utilization 0…1, nil when this account's usage could not be fetched.
+    /// Utilization 0…1, nil when this account's usage has never been fetched. While
+    /// `gaugesAreStale` it is the last-known value, not a current one.
     public let fiveHour: Double?
     public let weekly: Double?
     /// When each window clears, nil when unknown. Carried alongside the utilization so a
@@ -28,7 +29,7 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
     public let weeklyResetsAt: Date?
     /// True when fresh data shows the account has no 5-hour limit at all (verified Claude
     /// Ultra). `fiveHour` is nil then too, so this flag is what tells "no such limit" apart
-    /// from "unknown". Always false while the gauges are stale.
+    /// from "unknown". Carried from the last-known snapshot while the gauges are stale.
     public let hasNoFiveHourLimit: Bool
     /// The per-model weekly window the API scopes separately (Fable today; it has been
     /// Opus and Sonnet before). Carried by the model's own name rather than a hardcoded
@@ -36,7 +37,13 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
     public let scopedModel: Double?
     public let scopedModelResetsAt: Date?
     public let scopedModelLabel: String?
+    /// True when the latest poll failed. The gauges then still carry the last-known values
+    /// (shown dimmed under a banner) — hiding them left the card empty for the whole
+    /// rate-limit back-off. Policy consumers must check this flag before trusting the values;
+    /// `AccountSnapshot` drops them itself.
     public let gaugesAreStale: Bool
+    /// When the values on this row were fetched, nil when there are none.
+    public let fetchedAt: Date?
     /// Why the gauges are stale, when known — nil if not stale or the reason is unknown.
     public let staleReason: GaugeStaleReason?
     public let lastActiveAt: Date?
@@ -57,21 +64,23 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
         scopedModelLabel: String? = nil,
         staleReason: GaugeStaleReason? = nil,
         hasNoFiveHourLimit: Bool = false,
-        plan: String? = nil
+        plan: String? = nil,
+        fetchedAt: Date? = nil
     ) {
         self.accountUuid = accountUuid
         self.label = label
         self.isActive = isActive
         self.health = health
-        self.fiveHour = gaugesAreStale ? nil : fiveHour
-        self.weekly = gaugesAreStale ? nil : weekly
-        self.fiveHourResetsAt = gaugesAreStale ? nil : fiveHourResetsAt
-        self.weeklyResetsAt = gaugesAreStale ? nil : weeklyResetsAt
-        self.hasNoFiveHourLimit = !gaugesAreStale && hasNoFiveHourLimit && fiveHour == nil
-        self.scopedModel = gaugesAreStale ? nil : scopedModel
-        self.scopedModelResetsAt = gaugesAreStale ? nil : scopedModelResetsAt
-        self.scopedModelLabel = gaugesAreStale ? nil : scopedModelLabel
+        self.fiveHour = fiveHour
+        self.weekly = weekly
+        self.fiveHourResetsAt = fiveHourResetsAt
+        self.weeklyResetsAt = weeklyResetsAt
+        self.hasNoFiveHourLimit = hasNoFiveHourLimit && fiveHour == nil
+        self.scopedModel = scopedModel
+        self.scopedModelResetsAt = scopedModelResetsAt
+        self.scopedModelLabel = scopedModelLabel
         self.gaugesAreStale = gaugesAreStale
+        self.fetchedAt = fetchedAt
         self.staleReason = gaugesAreStale ? staleReason : nil
         self.lastActiveAt = lastActiveAt
         self.plan = plan
@@ -92,9 +101,11 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
         return fiveHour(from: limits)
     }
 
-    /// Same rule as `fiveHourForPolicy(from:)`, for a row already built.
+    /// Same rule as `fiveHourForPolicy(from:)`, for a row already built. Nil while stale:
+    /// last-known values are for display, never for a swap decision.
     public var fiveHourForPolicy: Double? {
-        hasNoFiveHourLimit ? 0 : fiveHour
+        guard !gaugesAreStale else { return nil }
+        return hasNoFiveHourLimit ? 0 : fiveHour
     }
 
     /// The one percentage a compact account summary shows: the 5-hour window, or the weekly
@@ -157,7 +168,8 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
             scopedModelLabel: scopedModelLabel(from: limits),
             staleReason: staleReason,
             hasNoFiveHourLimit: limits?.hasNoFiveHourLimit ?? false,
-            plan: livePlan ?? slot.identity.plan ?? ClaudePlan.displayName(credentialJSON: slot.credentialJSON)
+            plan: livePlan ?? slot.identity.plan ?? ClaudePlan.displayName(credentialJSON: slot.credentialJSON),
+            fetchedAt: limits?.fetchedAt
         )
     }
 
@@ -185,14 +197,15 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
             scopedModelLabel: scopedModelLabel(from: limits),
             staleReason: staleReason,
             hasNoFiveHourLimit: limits?.hasNoFiveHourLimit ?? false,
-            plan: identity.plan
+            plan: identity.plan,
+            fetchedAt: limits?.fetchedAt
         )
     }
 
     /// Rows with the active account's gauges replaced by the shared live-limits
     /// snapshot — the one owner of the signed-in account's usage. Callers must explicitly
-    /// attest that the snapshot is fresh; the safe default hides its values. Sleeping rows
-    /// pass through untouched (their initializer has already hidden stale values). Surfaces
+    /// attest that the snapshot is fresh; the safe default marks it stale (values stay as
+    /// last-known, flagged). Sleeping rows pass through untouched. Surfaces
     /// render THESE rows, never the raw ones, so no
     /// consumer can forget the active-account join again (the popover's headroom
     /// column did exactly that, and the active row dashed out forever).
@@ -206,6 +219,9 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
             let liveHasPrimaryGauge = fiveHour(from: live) != nil || weekly(from: live) != nil
             let matchesAccount = live?.account.map { $0.accountUuid == row.accountUuid } ?? true
             let gaugesAreStale = !liveIsFresh || !liveHasPrimaryGauge || !matchesAccount
+            // Another account's numbers must never appear on this card, stale or not. A
+            // stale snapshot that IS this account's stays visible as last-known data.
+            let live = matchesAccount ? live : nil
             return AccountPresentation(
                 accountUuid: row.accountUuid,
                 label: row.label,
@@ -228,7 +244,8 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
                 // reason must not survive onto the active row.
                 staleReason: gaugesAreStale ? liveStaleReason : nil,
                 hasNoFiveHourLimit: live?.hasNoFiveHourLimit ?? false,
-                plan: row.plan
+                plan: row.plan,
+                fetchedAt: live?.fetchedAt
             )
         }
     }

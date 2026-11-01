@@ -694,7 +694,8 @@ public enum Fixtures {
             scopedModelResetsAt: AccountPresentation.scopedModelWindow(from: limits)?.resetsAt,
             scopedModelLabel: AccountPresentation.scopedModelLabel(from: limits),
             hasNoFiveHourLimit: limits?.hasNoFiveHourLimit ?? false,
-            plan: identity.plan
+            plan: identity.plan,
+            fetchedAt: limits.map { _ in now.addingTimeInterval(-(staleSecondsAgo ?? 0)) }
         )
     }
 

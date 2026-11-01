@@ -133,8 +133,8 @@ struct AccountPresentationOverlayTests {
         #expect(overlaid.staleReason == nil)
     }
 
-    @Test("a stale live snapshot hides every usage field and preserves its failure reason")
-    func staleLiveSnapshotIsNotDisplayed() {
+    @Test("a rate-limited live snapshot keeps its last-known values and failure reason")
+    func staleLiveSnapshotKeepsLastKnownValues() {
         let reset = Date(timeIntervalSince1970: 1_700_001_000)
         let live = UsageLimits(
             windows: [
@@ -159,13 +159,14 @@ struct AccountPresentationOverlayTests {
             [row], live: live, liveIsFresh: false, liveStaleReason: .rateLimited
         )[0]
 
-        #expect(overlaid.fiveHour == nil)
-        #expect(overlaid.weekly == nil)
-        #expect(overlaid.fiveHourResetsAt == nil)
-        #expect(overlaid.weeklyResetsAt == nil)
-        #expect(overlaid.scopedModel == nil)
-        #expect(overlaid.scopedModelResetsAt == nil)
-        #expect(overlaid.scopedModelLabel == nil)
+        #expect(overlaid.fiveHour == 0.99)
+        #expect(overlaid.weekly == 0.88)
+        #expect(overlaid.fiveHourResetsAt == reset)
+        #expect(overlaid.weeklyResetsAt == reset)
+        #expect(overlaid.scopedModel == 0.77)
+        #expect(overlaid.scopedModelResetsAt == reset)
+        #expect(overlaid.scopedModelLabel == "Fable")
+        #expect(overlaid.fetchedAt == t0)
         #expect(overlaid.gaugesAreStale)
         #expect(overlaid.staleReason == .rateLimited)
     }
