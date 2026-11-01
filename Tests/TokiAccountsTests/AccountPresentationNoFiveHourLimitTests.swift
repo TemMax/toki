@@ -39,10 +39,12 @@ struct AccountPresentationNoFiveHourLimitTests {
         #expect(AccountPresentation.fiveHourForPolicy(from: ultra) == 0)
     }
 
-    @Test("stale or missing data stays unknown rather than limit-free")
+    @Test("stale data keeps the display shape but never feeds policy; missing data stays unknown")
     func unknownStaysUnknown() {
         let stale = AccountPresentation.make(slot: slot(), active: false, limits: ultra, stale: true)
-        #expect(!stale.hasNoFiveHourLimit)
+        // The card keeps its last-known shape — no phantom "unavailable" 5-hour bar.
+        #expect(stale.hasNoFiveHourLimit)
+        #expect(stale.weekly == 0.16)
         #expect(stale.fiveHourForPolicy == nil)
         let missing = AccountPresentation.make(slot: slot(), active: false, limits: nil, stale: false)
         #expect(!missing.hasNoFiveHourLimit)

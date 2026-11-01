@@ -69,15 +69,16 @@ struct AccountPresentationTests {
         #expect(row.gaugesAreStale)
     }
 
-    @Test("a stale sleeping row never exposes cached percentages")
-    func staleSleepingRowHidesCachedLimits() {
+    @Test("a stale sleeping row keeps its last-known percentages, flagged stale")
+    func staleSleepingRowKeepsLastKnownLimits() {
         let row = AccountPresentation.make(
             slot: slot(), active: false, limits: limits(session: 0.91, weekly: 0.82), stale: true,
             staleReason: .network
         )
 
-        #expect(row.fiveHour == nil)
-        #expect(row.weekly == nil)
+        #expect(row.fiveHour == 0.91)
+        #expect(row.weekly == 0.82)
+        #expect(row.fetchedAt != nil)
         #expect(row.gaugesAreStale)
         #expect(row.staleReason == .network)
     }
