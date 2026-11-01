@@ -5,6 +5,7 @@
 /// shows a detail caption below (e.g. "resets in ~3h"). Fill animates with a
 /// soft spring; percent text uses .numericText() content transition.
 import SwiftUI
+import TokiCore
 
 struct CapsuleGauge: View {
     let title: String
@@ -14,6 +15,9 @@ struct CapsuleGauge: View {
     /// Section labels use uppercase throughout Toki, but product names such as
     /// "GPT-5.3 Codex Spark" are proper names rather than labels.
     var uppercaseTitle: Bool = true
+    /// How this window's usage compares with the clock. Draws a mark where even spending
+    /// would be, and a warning line when the limit runs out before the reset at this rate.
+    var pace: UsagePace? = nil
 
     private var clamped: Double { min(max(fraction, 0), 1) }
     private var percentText: String { "\(Int((clamped * 100).rounded()))%" }
@@ -55,6 +59,16 @@ struct CapsuleGauge: View {
                             .fill(fillColor)
                             .frame(width: fillWidth, height: 6)
                     }
+
+                    // Pace mark: where the fill would be with even spending. Fill past it
+                    // means the limit runs out before the reset.
+                    if !isUnavailable, let pace {
+                        Capsule()
+                            .fill(Palette.textPrimary.opacity(0.55))
+                            .frame(width: 2, height: 10)
+                            .offset(x: min(max(pace.expected * geo.size.width - 1, 0), geo.size.width - 2))
+                            .accessibilityHidden(true)
+                    }
                 }
             }
             .frame(height: 6)
@@ -74,6 +88,24 @@ struct CapsuleGauge: View {
                     .textStyle(.detail)
                     .foregroundStyle(Palette.textSecondary)
             }
+            if !isUnavailable, let warning = pace?.warningText() {
+                Label(warning, systemImage: "arrow.up.right")
+                    .labelStyle(.titleAndIcon)
+                    .textStyle(.detail)
+                    .foregroundStyle(Palette.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(paceAccessibilityText)
+    }
+
+    private var paceAccessibilityText: String {
+        guard !isUnavailable, let pace else { return "" }
+        switch pace.verdict {
+        case .ahead: return pace.warningText() ?? "ahead of pace"
+        case .onPace: return "on pace"
+        case .under: return "under pace"
         }
     }
 }
@@ -97,7 +129,9 @@ private struct UnavailableTag: View {
 #Preview("CapsuleGauge") {
     VStack(spacing: 16) {
         CapsuleGauge(title: "5-hour", fraction: 0.35, detail: "resets in ~2h 10m")
-        CapsuleGauge(title: "7-day", fraction: 0.68, detail: "resets in ~4d")
+        CapsuleGauge(title: "7-day", fraction: 0.68, detail: "resets in ~4d",
+                     pace: UsagePace(utilization: 0.68, resetsAt: Date().addingTimeInterval(4 * 86400),
+                                     duration: 7 * 86400))
         CapsuleGauge(title: "7-day Opus", fraction: 0.91, detail: "resets in ~6d")
         CapsuleGauge(title: "Maxed out", fraction: 1.0)
         CapsuleGauge(title: "Empty", fraction: 0.0)

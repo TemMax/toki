@@ -271,6 +271,15 @@ public struct UsageLimits: Sendable, Codable {
                 .filter { $0.id.hasPrefix("session_scoped:") }
                 .max(by: { $0.utilization < $1.utilization })
     }
+    /// True when the account has no 5-hour limit at all: the provider reports the weekly
+    /// window but no 5-hour one. Since 2026-10-30, verified Claude Ultra accounts work this
+    /// way. This is not the same as missing data. A response with no weekly window either
+    /// proves nothing, so this stays false for it and the caller keeps treating the 5-hour
+    /// window as unknown.
+    public var hasNoFiveHourLimit: Bool {
+        fiveHour == nil && windows.contains { $0.id == "weekly_all" }
+    }
+
     /// The canonical 7-day all-models window, if present.
     public var sevenDay: RateLimitWindow? {
         windows.first { $0.id == "weekly_all" }

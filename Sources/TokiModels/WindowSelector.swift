@@ -20,12 +20,22 @@ public struct SelectedWindow: Equatable, Sendable {
     public let utilization: Double
     public let resetsAt: Date?
     public let isAvailable: Bool
+    /// The window's length when known (see `RateLimitWindow.duration`), for its pace.
+    public let duration: TimeInterval?
 
-    public init(title: String, utilization: Double, resetsAt: Date?, isAvailable: Bool) {
+    public init(title: String, utilization: Double, resetsAt: Date?, isAvailable: Bool,
+                duration: TimeInterval? = nil) {
         self.title = title
         self.utilization = utilization
         self.resetsAt = resetsAt
         self.isAvailable = isAvailable
+        self.duration = duration
+    }
+
+    /// See `UsagePace`; nil for an unavailable window or one of unknown length.
+    public func pace(now: Date = Date()) -> UsagePace? {
+        guard isAvailable else { return nil }
+        return UsagePace(utilization: utilization, resetsAt: resetsAt, duration: duration, now: now)
     }
 }
 
@@ -83,7 +93,8 @@ public extension WindowSelector {
             title: modelName(fromScopedId: window.id) ?? window.title,
             utilization: window.utilization,
             resetsAt: window.resetsAt,
-            isAvailable: window.isAvailable
+            isAvailable: window.isAvailable,
+            duration: window.duration
         )
     }
 

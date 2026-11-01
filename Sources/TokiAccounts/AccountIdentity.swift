@@ -2,7 +2,8 @@
 import Foundation
 
 /// Parsed from the `oauthAccount` block of `~/.claude.json`. Only the fields Toki
-/// displays or keys on are kept — never tokens, billing or trial data.
+/// displays or keys on are kept — never tokens, billing or trial data. The plan name is
+/// kept as a display string only ("Ultra"), not the billing details behind it.
 public struct AccountIdentity: Codable, Equatable, Sendable {
     /// Stable across logins; the slot key. Email can change, so it is display-only.
     public let accountUuid: String
@@ -10,19 +11,24 @@ public struct AccountIdentity: Codable, Equatable, Sendable {
     public let displayName: String?
     public let organizationName: String?
     public let organizationUuid: String?
+    /// The subscription plan's display name when the source named one ("Pro", "Max",
+    /// "Ultra"). Optional in storage, so slots saved before it existed still decode.
+    public let plan: String?
 
     public init(
         accountUuid: String,
         email: String?,
         displayName: String?,
         organizationName: String?,
-        organizationUuid: String?
+        organizationUuid: String?,
+        plan: String? = nil
     ) {
         self.accountUuid = accountUuid
         self.email = email
         self.displayName = displayName
         self.organizationName = organizationName
         self.organizationUuid = organizationUuid
+        self.plan = plan
     }
 
     public static func parse(oauthAccount: [String: Any]) -> AccountIdentity? {
@@ -37,7 +43,12 @@ public struct AccountIdentity: Codable, Equatable, Sendable {
             email: string("emailAddress"),
             displayName: string("displayName"),
             organizationName: string("organizationName"),
-            organizationUuid: string("organizationUuid")
+            organizationUuid: string("organizationUuid"),
+            plan: ClaudePlan.displayName(
+                planDisplayName: string("planDisplayName"),
+                rateLimitTier: string("organizationRateLimitTier") ?? string("userRateLimitTier"),
+                organizationType: string("organizationType")
+            )
         )
     }
 

@@ -52,6 +52,7 @@ macOS 14 or later · Apple Silicon
 ## Features
 
 - **Live Claude Code and Codex limits.** See five-hour, weekly and model-specific windows with reset countdowns when the provider reports them.
+- **Usage pace.** See where even spending would be in each window, and get a warning when you would run out before the reset.
 - **Fresh Claude usage while you work.** An optional Claude Code status-line integration keeps the main usage windows current after replies.
 - **Highly customizable menu bar.** Choose which limits appear, reorder them, and show each as a bar, number or both with optional labels.
 - **Usage analytics.** Explore tokens, API calls, projects, models and estimated API-equivalent spend from local transcripts. Estimates are not your provider's bill.

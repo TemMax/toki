@@ -46,4 +46,7 @@ public enum Scenario: String, CaseIterable, Sendable {
     case claudeResetsCooldown = "claude-resets-cooldown"
     /// An account whose reset balance exists but is not eligible for use.
     case claudeResetsIneligible = "claude-resets-ineligible"
+    /// A verified Claude Ultra account: no 5-hour window at all, and weekly usage running
+    /// ahead of the clock, beside a Max account that still has its 5-hour window.
+    case ultraPace = "ultra-pace"
 }

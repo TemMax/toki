@@ -83,6 +83,11 @@ struct AccountSwitcher: View {
                 Text(account.label)
                     .textStyle(.detail)
                     .foregroundStyle(Palette.textPrimary)
+                if let plan = account.plan {
+                    Text(plan)
+                        .textStyle(.caption)
+                        .foregroundStyle(Palette.textSecondary)
+                }
                 Spacer()
                 if model.swapInFlight == account.accountUuid {
                     ProgressView().controlSize(.small)
@@ -109,8 +114,10 @@ struct AccountSwitcher: View {
         // A stale gauge holds a possibly hours-old percentage; showing it as
         // current would misrepresent headroom. The active row can't dash here in
         // steady state: `presentedAccounts` joins it to the live-limits store.
-        guard !account.gaugesAreStale, let five = account.fiveHour else { return "—" }
-        return "\(Int((five * 100).rounded()))%"
+        guard !account.gaugesAreStale, let used = account.headlineUtilization else { return "—" }
+        let percent = "\(Int((used * 100).rounded()))%"
+        // Other rows show their 5-hour figure here, so name the window when it is the weekly one.
+        return account.hasNoFiveHourLimit ? "7d \(percent)" : percent
     }
 
     /// Read fresh on each swap from the one store that gates every notification Toki sends —

@@ -164,6 +164,9 @@ struct AccountsView: View {
                 if account.isActive {
                     StatusPill(text: "Active", color: Palette.accent, active: true)
                 }
+                if let plan = account.plan {
+                    StatusPill(text: plan, color: Palette.textSecondary)
+                }
                 if account.health == .needsReauth {
                     StatusPill(text: "Sign in again", color: Palette.critical)
                 }
@@ -192,21 +195,36 @@ struct AccountsView: View {
                 .foregroundStyle(Palette.warn)
             }
 
-            HStack(spacing: Spacing.md) {
-                CapsuleGauge(
-                    title: "5-hour", fraction: five ?? 0,
-                    detail: five == nil ? nil : ResetCountdown.text(for: fiveReset),
-                    isUnavailable: five == nil
-                )
+            // Top-aligned: a gauge with a pace warning is a line taller than its neighbours.
+            HStack(alignment: .top, spacing: Spacing.md) {
+                // No gauge at all for an account without a 5-hour limit. An empty
+                // "unavailable" bar would read as missing data.
+                if !account.hasNoFiveHourLimit {
+                    CapsuleGauge(
+                        title: "5-hour", fraction: five ?? 0,
+                        detail: five == nil ? nil : ResetCountdown.text(for: fiveReset),
+                        isUnavailable: five == nil,
+                        pace: five.flatMap {
+                            UsagePace(utilization: $0, resetsAt: fiveReset,
+                                      duration: RateLimitWindow.duration(forId: "session"))
+                        }
+                    )
+                }
                 CapsuleGauge(
                     title: "Weekly", fraction: weekly ?? 0,
                     detail: weekly == nil ? nil : ResetCountdown.text(for: weeklyReset),
-                    isUnavailable: weekly == nil
+                    isUnavailable: weekly == nil,
+                    pace: weekly.flatMap {
+                        UsagePace(utilization: $0, resetsAt: weeklyReset,
+                                  duration: RateLimitWindow.duration(forId: "weekly_all"))
+                    }
                 )
                 if let scoped, let scopedLabel {
                     CapsuleGauge(
                         title: scopedLabel, fraction: scoped,
-                        detail: ResetCountdown.text(for: scopedReset)
+                        detail: ResetCountdown.text(for: scopedReset),
+                        pace: UsagePace(utilization: scoped, resetsAt: scopedReset,
+                                        duration: RateLimitWindow.duration(forId: "weekly_all"))
                     )
                 }
             }
