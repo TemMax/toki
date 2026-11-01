@@ -68,7 +68,21 @@ struct MenuBarStripView: View {
                 bar(indicator)
                 number(indicator)
             }
+            if style.showsPaceWarning, indicator.isAheadOfPace, !indicator.isUnavailable {
+                paceMark
+            }
         }
+    }
+
+    /// Usage is outrunning the clock: the limit runs out before the window resets at this
+    /// rate. Only drawn in that state. Colour is not available to say it (the strip is a
+    /// template mask), so a glyph does.
+    private var paceMark: some View {
+        Text("↑")
+            // TYPE-SCALE EXEMPT: sized off the user's `MenuBarStyle.labelSize` like the label.
+            .font(.system(size: labelPointSize, weight: .semibold))
+            .foregroundStyle(fillColor)
+            .fixedSize()
     }
 
     /// The window's short name — `5h`, `7d`, `Opus` — or a `customLabel` override. Drawn

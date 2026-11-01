@@ -51,6 +51,18 @@ struct MenuBarEditorView: View {
     /// actual display, not a fixed guess.
     @Environment(\.displayScale) private var displayScale
 
+    /// The row being dragged by its handle and how far it has moved, nil when none is.
+    @State private var drag: RowDrag?
+    /// Each visible row's frame in `indicatorListSpace`, for working out the drop slot.
+    @State private var rowFrames: [UUID: CGRect] = [:]
+
+    private struct RowDrag: Equatable {
+        let id: UUID
+        var translation: CGFloat
+    }
+
+    private static let indicatorListSpace = "indicatorList"
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -248,9 +260,37 @@ struct MenuBarEditorView: View {
                 ForEach(Array(visibleIndicators.enumerated()), id: \.element.id) { offset, indicator in
                     if offset > 0 { divider }
                     indicatorRow(indicator)
+                        .background(
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: RowFramesKey.self,
+                                    value: [indicator.id: geometry.frame(in: .named(Self.indicatorListSpace))]
+                                )
+                            }
+                        )
+                        .background(dropTargetHighlight(for: indicator.id))
+                        .offset(y: drag?.id == indicator.id ? drag?.translation ?? 0 : 0)
+                        .zIndex(drag?.id == indicator.id ? 1 : 0)
                 }
             }
+            .coordinateSpace(name: Self.indicatorListSpace)
+            // Frozen while a row is dragged: the dragged row's frame moves with its offset,
+            // and adding the drag translation to a frame that already includes it counted the
+            // move twice (one row down landed two rows down).
+            .onPreferenceChange(RowFramesKey.self) { frames in
+                if drag == nil { rowFrames = frames }
+            }
             .padding(.top, 2)
+
+            ForEach(providersWithoutFiveHourLimit, id: \.self) { provider in
+                Label(
+                    "This \(provider.displayName) account has no 5-hour limit, so 5-hour rows show the 7-day window.",
+                    systemImage: "info.circle"
+                )
+                .textStyle(.caption)
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(Spacing.sm)
         .panelCard()
@@ -275,11 +315,7 @@ struct MenuBarEditorView: View {
     private func indicatorRow(_ indicator: MenuBarIndicator) -> some View {
         let canRemove = visibleIndicators.count > 1
         return HStack(spacing: Spacing.xxs) {
-            Image(systemName: "line.3.horizontal")
-                .iconSize(.small)
-                .foregroundStyle(Palette.textSecondary)
-                .help("Drag to reorder")
-                .draggable(indicator.id.uuidString)
+            dragHandle(indicator.id)
 
             providerPicker(selection: providerBinding(indicator.id))
                 .frame(width: 76, alignment: .leading)
@@ -324,10 +360,62 @@ struct MenuBarEditorView: View {
             .disabled(!canRemove)
             .help(canRemove ? "Remove" : "At least one indicator is required")
         }
-        .dropDestination(for: String.self) { items, _ in
-            guard let raw = items.first, let draggedID = UUID(uuidString: raw) else { return false }
-            moveIndicator(id: draggedID, before: indicator.id)
-            return true
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Move up") { moveIndicator(indicator.id, by: -1) }
+        .accessibilityAction(named: "Move down") { moveIndicator(indicator.id, by: 1) }
+    }
+
+    /// The reorder handle. A plain drag gesture, not system drag and drop: `.draggable` with a
+    /// `.dropDestination` on each row never reordered anything in this sheet, because the
+    /// pasteboard drag it starts did not reach the rows' drop handlers. A gesture keeps the
+    /// whole interaction inside this view: the row follows the pointer and lands on release.
+    ///
+    /// The frame and content shape make the whole 18×24 cell grabbable. The bare symbol is
+    /// three hairlines, and only those pixels took the mouse.
+    private func dragHandle(_ id: UUID) -> some View {
+        Image(systemName: "line.3.horizontal")
+            .iconSize(.small)
+            .foregroundStyle(drag?.id == id ? Palette.textPrimary : Palette.textSecondary)
+            .frame(width: 18, height: 24)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.indicatorListSpace))
+                    .onChanged { value in
+                        // `set`, not `push`: the hover handler owns the cursor stack, and the
+                        // pointer can leave the handle mid-drag.
+                        NSCursor.closedHand.set()
+                        drag = RowDrag(id: id, translation: value.translation.height)
+                    }
+                    .onEnded { value in
+                        if let target = dropTarget(dragging: id, translation: value.translation.height) {
+                            mutateIndicators {
+                                $0 = MenuBarReorder.moving(id, toPositionOf: target, in: $0)
+                            }
+                        }
+                        drag = nil
+                    }
+            )
+            .help("Drag to reorder")
+            .accessibilityHidden(true)
+    }
+
+    private func dropTarget(dragging id: UUID, translation: CGFloat) -> UUID? {
+        let rows = visibleIndicators.compactMap { indicator in
+            rowFrames[indicator.id].map { (id: indicator.id, frame: $0) }
+        }
+        return MenuBarReorder.target(dragging: id, translation: translation, rows: rows)
+    }
+
+    /// Outlines the row the dragged one would land on, so the drop is predictable.
+    @ViewBuilder
+    private func dropTargetHighlight(for id: UUID) -> some View {
+        if let drag, drag.id != id, dropTarget(dragging: drag.id, translation: drag.translation) == id {
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Palette.accent.opacity(0.7), lineWidth: 1)
+                .padding(-3)
         }
     }
 
@@ -400,8 +488,20 @@ struct MenuBarEditorView: View {
         return MenuBarLayout.resolve(
             config,
             claudeLimits: menuBar.limits,
-            codexLimits: menuBar.codexLimits
+            codexLimits: menuBar.codexLimits,
+            adaptsToAbsentFiveHourLimits: false
         ).first?.title ?? ""
+    }
+
+    /// Providers whose 5-hour rows the strip currently draws as the 7-day window, because
+    /// the signed-in account has no 5-hour limit (verified Claude Ultra).
+    private var providersWithoutFiveHourLimit: [UsageProvider] {
+        let configured = Set(visibleIndicators.filter { $0.window == .fiveHour }.map(\.provider))
+        return UsageProvider.allCases.filter { provider in
+            guard configured.contains(provider) else { return false }
+            let limits = provider == .claudeCode ? menuBar.limits : menuBar.codexLimits
+            return limits?.hasNoFiveHourLimit == true
+        }
     }
 
     // MARK: - Body — indicator mutation
@@ -459,14 +559,11 @@ struct MenuBarEditorView: View {
         }
     }
 
-    private func moveIndicator(id: UUID, before targetID: UUID) {
-        guard id != targetID else { return }
-        mutateIndicators { indicators in
-            guard let fromIndex = indicators.firstIndex(where: { $0.id == id }) else { return }
-            let item = indicators.remove(at: fromIndex)
-            let insertIndex = indicators.firstIndex(where: { $0.id == targetID }) ?? indicators.count
-            indicators.insert(item, at: insertIndex)
-        }
+    /// One step up or down among the visible rows (the accessibility actions).
+    private func moveIndicator(_ id: UUID, by step: Int) {
+        let visible = visibleIndicators.map(\.id)
+        guard let index = visible.firstIndex(of: id), visible.indices.contains(index + step) else { return }
+        mutateIndicators { $0 = MenuBarReorder.moving(id, toPositionOf: visible[index + step], in: $0) }
     }
 
     private func windowBinding(_ id: UUID) -> Binding<WindowSelector> {
@@ -568,6 +665,27 @@ struct MenuBarEditorView: View {
                 "Bar height", value: styleDoubleBinding(\.barHeight),
                 range: MenuBarStyle.minimumBarHeight...MenuBarStyle.maximumBarHeight, unit: "pt"
             )
+
+            groupHeader("Pace")
+            HStack(alignment: .top, spacing: Spacing.sm) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Warn when ahead of pace")
+                        .textStyle(.detail)
+                        .foregroundStyle(Palette.textPrimary)
+                    Text("Adds ↑ to a limit while usage outruns the clock, so it would run out before it resets.")
+                        .textStyle(.caption)
+                        .foregroundStyle(Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: Spacing.xs)
+                Toggle("", isOn: Binding(
+                    get: { menuBar.configuration.style.showsPaceWarning },
+                    set: { newValue in mutateStyle { $0.showsPaceWarning = newValue } }
+                ))
+                .labelsHidden()
+                .toggleStyle(.tokiSwitch)
+                .accessibilityLabel("Warn when ahead of pace")
+            }
 
             groupHeader("Compact mode")
             TokiSegmentedPicker(
@@ -683,7 +801,8 @@ struct MenuBarEditorView: View {
             leading: style.leading, trailing: style.trailing, separator: style.separator,
             labelGap: style.labelGap, groupGap: style.groupGap, valueSize: style.valueSize,
             labelSize: style.labelSize, unitScale: style.unitScale,
-            barWidth: style.barWidth, barHeight: style.barHeight
+            barWidth: style.barWidth, barHeight: style.barHeight,
+            showsPaceWarning: style.showsPaceWarning
         )
         let current = menuBar.configuration
         menuBar.configuration = MenuBarConfiguration(indicators: current.indicators, style: rebuilt, compact: current.compact)
@@ -803,4 +922,12 @@ private struct DoneButton: View {
     container.apply(.fixture(.singleAccount))
     return MenuBarEditorView(menuBar: container.menuBarVM)
         .frame(height: MenuBarEditorView.sheetHeight)
+}
+
+/// Visible indicator rows' frames, gathered for drag-to-reorder.
+private struct RowFramesKey: PreferenceKey {
+    static let defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
 }

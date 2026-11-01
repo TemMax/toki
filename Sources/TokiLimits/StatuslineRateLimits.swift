@@ -68,6 +68,8 @@ public struct StatuslineRateLimits: Sendable, Equatable {
     ///   has just rolled over) waits for the next poll instead of painting the wrong gauges.
     /// - Usage inside one window only grows, so the higher reading wins: another session
     ///   redrawing with older headers cannot pull a gauge back.
+    /// - A sample only updates a 5-hour window the poll already reported. It never adds one
+    ///   to an account the poll says has no 5-hour limit.
     public func merged(into current: UsageLimits) -> UsageLimits? {
         guard observedAt > current.fetchedAt,
               let sevenDay,
@@ -75,7 +77,7 @@ public struct StatuslineRateLimits: Sendable, Equatable {
               let polledWeekReset = polledWeek.resetsAt,
               Self.isSameWindow(sevenDay.resetsAt, polledWeekReset) else { return nil }
 
-        var windows = current.windows.map { window -> RateLimitWindow in
+        let windows = current.windows.map { window -> RateLimitWindow in
             switch window.id {
             case "weekly_all":
                 return window.with(utilization: max(window.utilization, sevenDay.utilization),
@@ -86,10 +88,9 @@ public struct StatuslineRateLimits: Sendable, Equatable {
                 return window
             }
         }
-        if let fiveHour, !windows.contains(where: { $0.id == "session" }) {
-            windows.insert(RateLimitWindow(id: "session", title: "5-hour", utilization: fiveHour.utilization,
-                                           resetsAt: fiveHour.resetsAt, isAvailable: true), at: 0)
-        }
+        // No `session` in the poll, while `weekly_all` is there (the guard above needs it),
+        // means the account has no 5-hour limit (verified Claude Ultra). Claude Code can still
+        // send `five_hour` in its headers, so a sample must not add the window back.
         return UsageLimits(
             windows: windows,
             extra: current.extra,

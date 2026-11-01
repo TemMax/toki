@@ -45,6 +45,10 @@ public struct MenuBarStyle: Sendable, Equatable, Codable {
     public var unitScale: Double
     public var barWidth: Double
     public var barHeight: Double
+    /// Marks an indicator with an arrow while its usage runs ahead of the clock, i.e. the
+    /// limit would run out before the reset at this rate (`UsagePace`). The arrow only
+    /// appears in that state, so the strip looks the same as before the rest of the time.
+    public var showsPaceWarning: Bool
 
     // MARK: - Bounds
 
@@ -117,7 +121,8 @@ public struct MenuBarStyle: Sendable, Equatable, Codable {
         labelSize: Double = 10,
         unitScale: Double = 0.72,
         barWidth: Double = 3,
-        barHeight: Double = 11
+        barHeight: Double = 11,
+        showsPaceWarning: Bool = true
     ) {
         self.leading = Self.sanitizedFreeText(leading)
         self.trailing = Self.sanitizedFreeText(trailing)
@@ -129,6 +134,7 @@ public struct MenuBarStyle: Sendable, Equatable, Codable {
         self.unitScale = Self.clamp(unitScale, Self.minimumUnitScale, Self.maximumUnitScale, default: 0.72)
         self.barWidth = Self.clamp(barWidth, Self.minimumBarWidth, Self.maximumBarWidth, default: 3)
         self.barHeight = Self.clamp(barHeight, Self.minimumBarHeight, Self.maximumBarHeight, default: 11)
+        self.showsPaceWarning = showsPaceWarning
     }
 
     /// Exactly today's hardcoded appearance — see `App/Sources/MenuBarStripView.swift`
@@ -165,6 +171,7 @@ public struct MenuBarStyle: Sendable, Equatable, Codable {
 
     private enum CodingKeys: String, CodingKey {
         case leading, trailing, separator, labelGap, groupGap, valueSize, labelSize, unitScale, barWidth, barHeight
+        case showsPaceWarning
     }
 
     public init(from decoder: Decoder) throws {
@@ -184,7 +191,9 @@ public struct MenuBarStyle: Sendable, Equatable, Codable {
             labelSize: try container.decodeIfPresent(Double.self, forKey: .labelSize) ?? fallback.labelSize,
             unitScale: try container.decodeIfPresent(Double.self, forKey: .unitScale) ?? fallback.unitScale,
             barWidth: try container.decodeIfPresent(Double.self, forKey: .barWidth) ?? fallback.barWidth,
-            barHeight: try container.decodeIfPresent(Double.self, forKey: .barHeight) ?? fallback.barHeight
+            barHeight: try container.decodeIfPresent(Double.self, forKey: .barHeight) ?? fallback.barHeight,
+            showsPaceWarning: try container.decodeIfPresent(Bool.self, forKey: .showsPaceWarning)
+                ?? fallback.showsPaceWarning
         )
     }
 }

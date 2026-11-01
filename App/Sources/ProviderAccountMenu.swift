@@ -58,8 +58,10 @@ struct ClaudeAccountMenu: View {
 
     private func menuTitle(_ account: AccountPresentation) -> String {
         guard account.health != .needsReauth else { return "\(account.label) — sign in again" }
-        guard !account.gaugesAreStale, let usage = account.fiveHour else { return account.label }
-        return "\(account.label) — \(Int((usage * 100).rounded()))% used"
+        let label = account.plan.map { "\(account.label) (\($0))" } ?? account.label
+        guard !account.gaugesAreStale, let usage = account.headlineUtilization else { return label }
+        let window = account.hasNoFiveHourLimit ? " of weekly" : ""
+        return "\(label) — \(Int((usage * 100).rounded()))%\(window) used"
     }
 
     private func switchAccount(_ account: AccountPresentation) {

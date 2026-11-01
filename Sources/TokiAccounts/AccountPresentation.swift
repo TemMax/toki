@@ -26,6 +26,10 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
     /// card can say *when* 92% stops mattering — the number alone is not actionable.
     public let fiveHourResetsAt: Date?
     public let weeklyResetsAt: Date?
+    /// True when fresh data shows the account has no 5-hour limit at all (verified Claude
+    /// Ultra). `fiveHour` is nil then too, so this flag is what tells "no such limit" apart
+    /// from "unknown". Always false while the gauges are stale.
+    public let hasNoFiveHourLimit: Bool
     /// The per-model weekly window the API scopes separately (Fable today; it has been
     /// Opus and Sonnet before). Carried by the model's own name rather than a hardcoded
     /// id, so a renamed model shows up instead of silently emptying the gauge.
@@ -36,6 +40,8 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
     /// Why the gauges are stale, when known — nil if not stale or the reason is unknown.
     public let staleReason: GaugeStaleReason?
     public let lastActiveAt: Date?
+    /// The subscription plan's display name ("Pro", "Max", "Ultra"), nil when unknown.
+    public let plan: String?
     /// False for the account Claude Code is signed into that Toki hasn't saved yet. It is
     /// shown so the tab never looks empty while the user is plainly signed in; the UI offers
     /// to save it rather than switch to it (there is nothing to switch to — it is already
@@ -49,7 +55,9 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
         fiveHourResetsAt: Date? = nil, weeklyResetsAt: Date? = nil,
         scopedModel: Double? = nil, scopedModelResetsAt: Date? = nil,
         scopedModelLabel: String? = nil,
-        staleReason: GaugeStaleReason? = nil
+        staleReason: GaugeStaleReason? = nil,
+        hasNoFiveHourLimit: Bool = false,
+        plan: String? = nil
     ) {
         self.accountUuid = accountUuid
         self.label = label
@@ -59,12 +67,14 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
         self.weekly = gaugesAreStale ? nil : weekly
         self.fiveHourResetsAt = gaugesAreStale ? nil : fiveHourResetsAt
         self.weeklyResetsAt = gaugesAreStale ? nil : weeklyResetsAt
+        self.hasNoFiveHourLimit = !gaugesAreStale && hasNoFiveHourLimit && fiveHour == nil
         self.scopedModel = gaugesAreStale ? nil : scopedModel
         self.scopedModelResetsAt = gaugesAreStale ? nil : scopedModelResetsAt
         self.scopedModelLabel = gaugesAreStale ? nil : scopedModelLabel
         self.gaugesAreStale = gaugesAreStale
         self.staleReason = gaugesAreStale ? staleReason : nil
         self.lastActiveAt = lastActiveAt
+        self.plan = plan
         self.isStored = isStored
     }
 
@@ -72,6 +82,25 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
     /// surface reads the same window ids.
     public static func fiveHour(from limits: UsageLimits?) -> Double? {
         limits?.windows.first { $0.id == "session" }?.utilization
+    }
+
+    /// The 5-hour utilization auto-swap should use. An account with no 5-hour limit can
+    /// never hit one, so it counts as 0% used. A missing 5-hour window on an account that
+    /// does have the limit stays nil (unknown).
+    public static func fiveHourForPolicy(from limits: UsageLimits?) -> Double? {
+        if limits?.hasNoFiveHourLimit == true { return 0 }
+        return fiveHour(from: limits)
+    }
+
+    /// Same rule as `fiveHourForPolicy(from:)`, for a row already built.
+    public var fiveHourForPolicy: Double? {
+        hasNoFiveHourLimit ? 0 : fiveHour
+    }
+
+    /// The one percentage a compact account summary shows: the 5-hour window, or the weekly
+    /// one when the account has no 5-hour limit.
+    public var headlineUtilization: Double? {
+        hasNoFiveHourLimit ? weekly : fiveHour
     }
 
     /// The weekly utilization from a limits snapshot (nil when absent).
@@ -103,9 +132,12 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
         scopedModelWindow(from: limits).map { String($0.id.dropFirst(scopedModelPrefix.count)) }
     }
 
+    /// - Parameter livePlan: the plan `~/.claude.json` names right now, for the account
+    ///   Claude Code is signed into. It wins over the slot's copy, which is only as fresh as
+    ///   the moment the slot was saved.
     public static func make(
         slot: AccountSlot, active: Bool, limits: UsageLimits?, stale: Bool,
-        staleReason: GaugeStaleReason? = nil
+        staleReason: GaugeStaleReason? = nil, livePlan: String? = nil
     ) -> AccountPresentation {
         AccountPresentation(
             accountUuid: slot.identity.accountUuid,
@@ -123,7 +155,9 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
             scopedModel: scopedModelWindow(from: limits)?.utilization,
             scopedModelResetsAt: scopedModelWindow(from: limits)?.resetsAt,
             scopedModelLabel: scopedModelLabel(from: limits),
-            staleReason: staleReason
+            staleReason: staleReason,
+            hasNoFiveHourLimit: limits?.hasNoFiveHourLimit ?? false,
+            plan: livePlan ?? slot.identity.plan ?? ClaudePlan.displayName(credentialJSON: slot.credentialJSON)
         )
     }
 
@@ -149,7 +183,9 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
             scopedModel: scopedModelWindow(from: limits)?.utilization,
             scopedModelResetsAt: scopedModelWindow(from: limits)?.resetsAt,
             scopedModelLabel: scopedModelLabel(from: limits),
-            staleReason: staleReason
+            staleReason: staleReason,
+            hasNoFiveHourLimit: limits?.hasNoFiveHourLimit ?? false,
+            plan: identity.plan
         )
     }
 
@@ -190,7 +226,9 @@ public struct AccountPresentation: Equatable, Sendable, Identifiable {
                 scopedModelLabel: scopedModelLabel(from: live),
                 // The live feed carries its own health state; a sleeping-poll stale
                 // reason must not survive onto the active row.
-                staleReason: gaugesAreStale ? liveStaleReason : nil
+                staleReason: gaugesAreStale ? liveStaleReason : nil,
+                hasNoFiveHourLimit: live?.hasNoFiveHourLimit ?? false,
+                plan: row.plan
             )
         }
     }

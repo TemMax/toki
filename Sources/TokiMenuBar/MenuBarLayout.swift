@@ -10,19 +10,24 @@ public struct ResolvedIndicator: Sendable, Equatable {
     public let isUnavailable: Bool
     /// Whether the drawing prefixes this indicator with `title`.
     public let showsLabel: Bool
+    /// Usage is running ahead of the clock: at this rate the limit runs out before the
+    /// window resets (`UsagePace.Verdict.ahead`).
+    public let isAheadOfPace: Bool
 
     public init(
         title: String,
         fraction: Double?,
         rendering: IndicatorRendering,
         isUnavailable: Bool,
-        showsLabel: Bool = true
+        showsLabel: Bool = true,
+        isAheadOfPace: Bool = false
     ) {
         self.title = title
         self.fraction = fraction
         self.rendering = rendering
         self.isUnavailable = isUnavailable
         self.showsLabel = showsLabel
+        self.isAheadOfPace = isAheadOfPace
     }
 }
 
@@ -139,25 +144,33 @@ public enum MenuBarLayout {
             return "\(name): no data"
         }
         let percent = Int((fraction * 100).rounded())
-        return "\(name): \(percent) percent"
+        let pace = indicator.isAheadOfPace ? ", ahead of pace" : ""
+        return "\(name): \(percent) percent\(pace)"
     }
 
     public static func resolve(
         _ configuration: MenuBarConfiguration,
-        against limits: UsageLimits?
+        against limits: UsageLimits?,
+        now: Date = Date()
     ) -> [ResolvedIndicator] {
-        resolve(configuration, limitsForProvider: { _ in limits })
+        resolve(configuration, now: now, limitsForProvider: { _ in limits })
     }
 
     /// Provider-aware resolution used by the app. Keeping the legacy one-snapshot overload
     /// above preserves source compatibility for callers and stored-config tests while this
     /// entry point prevents a Codex row from ever reading Claude's similarly named window.
+    ///
+    /// - Parameter adaptsToAbsentFiveHourLimits: false resolves each indicator as configured,
+    ///   without `adaptingToAbsentFiveHourLimits`. The editor uses it to name a 5-hour row
+    ///   "5h" rather than the 7-day window drawn in its place.
     public static func resolve(
         _ configuration: MenuBarConfiguration,
         claudeLimits: UsageLimits?,
-        codexLimits: UsageLimits?
+        codexLimits: UsageLimits?,
+        now: Date = Date(),
+        adaptsToAbsentFiveHourLimits: Bool = true
     ) -> [ResolvedIndicator] {
-        resolve(configuration) { provider in
+        resolve(configuration, now: now, adaptsToAbsentFiveHourLimits: adaptsToAbsentFiveHourLimits) { provider in
             switch provider {
             case .claudeCode: claudeLimits
             case .codex: codexLimits
@@ -166,12 +179,17 @@ public enum MenuBarLayout {
     }
 
     private static func resolve(
-        _ configuration: MenuBarConfiguration,
+        _ stored: MenuBarConfiguration,
+        now: Date,
+        adaptsToAbsentFiveHourLimits: Bool = true,
         limitsForProvider: (UsageProvider) -> UsageLimits?
     ) -> [ResolvedIndicator] {
+        let configuration = adaptsToAbsentFiveHourLimits
+            ? adaptingToAbsentFiveHourLimits(stored, limitsForProvider: limitsForProvider)
+            : stored
         let resolved = configuration.indicators.map {
             applyCustomLabel(
-                resolveOne($0, against: limitsForProvider($0.provider)),
+                resolveOne($0, against: limitsForProvider($0.provider), now: now),
                 indicator: $0
             )
         }
@@ -188,11 +206,70 @@ public enum MenuBarLayout {
                 provider: provider,
                 configuration: configuration,
                 resolved: resolved,
-                against: limitsForProvider(provider)
+                against: limitsForProvider(provider),
+                now: now
             )]
         case .pinnedIndicator(let id):
             return [pinnedIndicator(id, configuration: configuration, resolved: resolved)]
         }
+    }
+
+    /// The configuration to draw for providers whose account has no 5-hour limit at all
+    /// (`UsageLimits.hasNoFiveHourLimit`, e.g. verified Claude Ultra). In that case a 5-hour
+    /// indicator would show "no data" forever. Instead, the first one turns into that
+    /// provider's 7-day indicator, which is now the account's binding limit. If the strip
+    /// already shows the 7-day window, the 5-hour indicator is dropped. A 5-hour pin in
+    /// compact mode follows the same rule.
+    ///
+    /// The stored configuration is never rewritten: when the account (or plan) changes back,
+    /// the user's own 5-hour indicators come back with it. Missing data (`limits == nil`)
+    /// is not a plan without a 5-hour limit, so it leaves everything as configured.
+    static func adaptingToAbsentFiveHourLimits(
+        _ configuration: MenuBarConfiguration,
+        limitsForProvider: (UsageProvider) -> UsageLimits?
+    ) -> MenuBarConfiguration {
+        func lacksFiveHour(_ provider: UsageProvider) -> Bool {
+            limitsForProvider(provider)?.hasNoFiveHourLimit == true
+        }
+        guard configuration.indicators.contains(where: { $0.window == .fiveHour && lacksFiveHour($0.provider) })
+        else { return configuration }
+
+        var indicators: [MenuBarIndicator] = []
+        // A dropped indicator's id maps to the 7-day indicator that now stands in for it, so
+        // a compact pin on the dropped row still resolves to the same provider's weekly gauge.
+        var replacementIds: [UUID: UUID] = [:]
+        for indicator in configuration.indicators {
+            guard indicator.window == .fiveHour, lacksFiveHour(indicator.provider) else {
+                indicators.append(indicator)
+                continue
+            }
+            let existingWeekly = (indicators + configuration.indicators).first {
+                $0.provider == indicator.provider && $0.window == .sevenDay
+            }
+            if let existingWeekly {
+                replacementIds[indicator.id] = existingWeekly.id
+            } else {
+                var weekly = indicator
+                weekly.window = .sevenDay
+                // A custom label was written for the 5-hour window ("5h", "session").
+                weekly.customLabel = nil
+                indicators.append(weekly)
+            }
+        }
+
+        let compact: CompactSelection?
+        switch configuration.compact {
+        case .pinned(.fiveHour):
+            let provider = configuration.indicators.first(where: { $0.window == .fiveHour })?.provider
+                ?? configuration.indicators.first?.provider
+                ?? .claudeCode
+            compact = lacksFiveHour(provider) ? .pinned(.sevenDay) : configuration.compact
+        case .pinnedIndicator(let id):
+            compact = .pinnedIndicator(replacementIds[id] ?? id)
+        default:
+            compact = configuration.compact
+        }
+        return MenuBarConfiguration(indicators: indicators, style: configuration.style, compact: compact)
     }
 
     /// Applied uniformly at the one call site above rather than inside every branch of
@@ -207,11 +284,12 @@ public enum MenuBarLayout {
             fraction: resolved.fraction,
             rendering: resolved.rendering,
             isUnavailable: resolved.isUnavailable,
-            showsLabel: resolved.showsLabel
+            showsLabel: resolved.showsLabel,
+            isAheadOfPace: resolved.isAheadOfPace
         )
     }
 
-    private static func resolveOne(_ indicator: MenuBarIndicator, against limits: UsageLimits?) -> ResolvedIndicator {
+    private static func resolveOne(_ indicator: MenuBarIndicator, against limits: UsageLimits?, now: Date) -> ResolvedIndicator {
         guard let limits else {
             // No data at all: every indicator still draws, unavailable rather than
             // absent — a blank status item looks like a crash, and a vanished
@@ -248,7 +326,8 @@ public enum MenuBarLayout {
             fraction: selected.utilization,
             rendering: indicator.rendering,
             isUnavailable: !selected.isAvailable,
-            showsLabel: indicator.showsLabel
+            showsLabel: indicator.showsLabel,
+            isAheadOfPace: selected.pace(now: now)?.verdict == .ahead
         )
     }
 
@@ -324,7 +403,8 @@ public enum MenuBarLayout {
             fraction: best.fraction,
             rendering: rendering,
             isUnavailable: best.isUnavailable,
-            showsLabel: showsLabel
+            showsLabel: showsLabel,
+            isAheadOfPace: best.isAheadOfPace
         )
     }
 
@@ -340,7 +420,8 @@ public enum MenuBarLayout {
         provider: UsageProvider,
         configuration: MenuBarConfiguration,
         resolved: [ResolvedIndicator],
-        against limits: UsageLimits?
+        against limits: UsageLimits?,
+        now: Date
     ) -> ResolvedIndicator {
         guard let first = resolved.first else {
             // `MenuBarConfiguration` clamps an empty list up to the standard set, so this is
@@ -361,14 +442,15 @@ public enum MenuBarLayout {
                 rendering: first.rendering,
                 showsLabel: first.showsLabel
             )
-            source = applyCustomLabel(resolveOne(syntheticIndicator, against: limits), indicator: syntheticIndicator)
+            source = applyCustomLabel(resolveOne(syntheticIndicator, against: limits, now: now), indicator: syntheticIndicator)
         }
         return ResolvedIndicator(
             title: source.title,
             fraction: source.fraction,
             rendering: first.rendering,
             isUnavailable: source.isUnavailable,
-            showsLabel: first.showsLabel
+            showsLabel: first.showsLabel,
+            isAheadOfPace: source.isAheadOfPace
         )
     }
 
@@ -395,7 +477,8 @@ public enum MenuBarLayout {
             fraction: source.fraction,
             rendering: first.rendering,
             isUnavailable: source.isUnavailable,
-            showsLabel: first.showsLabel
+            showsLabel: first.showsLabel,
+            isAheadOfPace: source.isAheadOfPace
         )
     }
 }

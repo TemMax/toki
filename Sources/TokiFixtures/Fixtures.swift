@@ -31,6 +31,7 @@ public enum Fixtures {
         case .claudeResetsZero: return claudeResetsZeroBundle(now: now)
         case .claudeResetsCooldown: return claudeResetsCooldownBundle(now: now)
         case .claudeResetsIneligible: return claudeResetsIneligibleBundle(now: now)
+        case .ultraPace: return ultraPaceBundle(now: now)
         }
     }
 
@@ -573,15 +574,63 @@ public enum Fixtures {
         )
     }
 
+    /// Verified Ultra (no `session` window) with the weekly window ahead of pace: 62% used
+    /// three days into the week, so it runs out about two and a half days early. The Fable
+    /// window is under pace. The second account is on Max and still has a 5-hour window.
+    private static func ultraPaceBundle(now: Date) -> FixtureBundle {
+        let identity = makeIdentity(
+            uuid: "fixture-ultra", email: "ada@example.com", displayName: "Ada Lovelace",
+            organizationName: "Analytical Engine", plan: "Ultra"
+        )
+        let limits = makeLimits(
+            now: now,
+            windows: [
+                makeWindow(id: "weekly_all", title: "7-day", utilization: 0.62, resetsIn: 4 * 24 * 3600, now: now),
+                makeWindow(id: "weekly_scoped:Fable", title: "7-day Fable", utilization: 0.20, resetsIn: 4 * 24 * 3600, now: now),
+            ],
+            extra: makeExtra(enabled: false)
+        )
+        let maxIdentity = makeIdentity(
+            uuid: "fixture-max", email: "grace@example.com", displayName: "Grace Hopper",
+            organizationName: "Analytical Engine", plan: "Max"
+        )
+        let maxLimits = makeLimits(
+            now: now,
+            windows: [
+                makeWindow(id: "session", title: "5-hour", utilization: 0.30, resetsIn: 2.5 * 3600, now: now),
+                makeWindow(id: "weekly_all", title: "7-day", utilization: 0.30, resetsIn: 5 * 24 * 3600, now: now),
+            ],
+            extra: makeExtra(enabled: false)
+        )
+        return FixtureBundle(
+            limits: limits,
+            limitsState: .ok,
+            summary: makeSummary(now: now, seed: 0x51A6_1E00, dailyCount: 10, modelCount: 4, projectCount: 6),
+            stats: makeStatsHistory(
+                now: now, seed: 0x5EED_1234, totalDays: 140,
+                gapStartOffset: 55, gapLength: 16, busiestOffset: 20
+            ),
+            identity: identity,
+            accounts: [
+                makeAccount(identity: identity, limits: limits, isActive: true, health: .ok, now: now),
+                makeAccount(identity: maxIdentity, limits: maxLimits, isActive: false, health: .ok,
+                            now: now.addingTimeInterval(-24 * 3600)),
+            ],
+            instances: makeInstances(now: now, count: 2),
+            environment: makeEnvironment()
+        )
+    }
+
     // MARK: - Shared value builders
 
     private static func makeIdentity(
         uuid: String, email: String?, displayName: String?, organizationName: String?,
-        organizationUuid: String? = nil
+        organizationUuid: String? = nil, plan: String? = nil
     ) -> AccountIdentity {
         AccountIdentity(
             accountUuid: uuid, email: email, displayName: displayName,
-            organizationName: organizationName, organizationUuid: organizationUuid
+            organizationName: organizationName, organizationUuid: organizationUuid,
+            plan: plan
         )
     }
 
@@ -643,7 +692,9 @@ public enum Fixtures {
             weeklyResetsAt: AccountPresentation.weeklyResetsAt(from: limits),
             scopedModel: AccountPresentation.scopedModelWindow(from: limits)?.utilization,
             scopedModelResetsAt: AccountPresentation.scopedModelWindow(from: limits)?.resetsAt,
-            scopedModelLabel: AccountPresentation.scopedModelLabel(from: limits)
+            scopedModelLabel: AccountPresentation.scopedModelLabel(from: limits),
+            hasNoFiveHourLimit: limits?.hasNoFiveHourLimit ?? false,
+            plan: identity.plan
         )
     }
 

@@ -511,3 +511,109 @@ struct PinnedCompactTests {
         #expect(resolved.first?.showsLabel == false)
     }
 }
+
+@Suite("Accounts without a 5-hour limit")
+struct NoFiveHourLimitLayoutTests {
+    /// What the usage API sends for a verified Claude Ultra account: weekly windows only.
+    private let ultra = limits([
+        window(id: "weekly_all", utilization: 0.16),
+        window(id: "weekly_scoped:Fable", utilization: 0.05),
+    ])
+
+    @Test("a lone 5-hour indicator becomes the 7-day one instead of reading no data forever")
+    func fiveHourBecomesWeekly() {
+        let configuration = MenuBarConfiguration(indicators: [
+            MenuBarIndicator(window: .fiveHour, rendering: .bar, customLabel: "S"),
+            MenuBarIndicator(window: .scopedModel("Fable"), rendering: .number),
+        ])
+        let resolved = MenuBarLayout.resolve(configuration, against: ultra)
+        #expect(resolved.map(\.title) == ["7d", "Fable"])
+        #expect(resolved.map(\.fraction) == [0.16, 0.05])
+        #expect(resolved[0].rendering == .bar)
+        #expect(resolved.allSatisfy { !$0.isUnavailable })
+    }
+
+    @Test("a 5-hour indicator beside a 7-day one is dropped, not duplicated")
+    func fiveHourDroppedBesideWeekly() {
+        let resolved = MenuBarLayout.resolve(MenuBarConfiguration(indicators: [
+            MenuBarIndicator(window: .fiveHour, rendering: .number),
+            MenuBarIndicator(window: .sevenDay, rendering: .number),
+        ]), against: ultra)
+        #expect(resolved.map(\.title) == ["7d"])
+    }
+
+    @Test("only the provider without a 5-hour limit changes")
+    func otherProviderUntouched() {
+        let resolved = MenuBarLayout.resolve(
+            MenuBarConfiguration(indicators: [
+                MenuBarIndicator(provider: .claudeCode, window: .fiveHour, rendering: .number),
+                MenuBarIndicator(provider: .codex, window: .fiveHour, rendering: .number),
+            ]),
+            claudeLimits: ultra,
+            codexLimits: limits([window(id: "session", utilization: 0.4), window(id: "weekly_all", utilization: 0.1)])
+        )
+        #expect(resolved.map(\.title) == ["7d", "C·5h"])
+        #expect(resolved.map(\.fraction) == [0.16, 0.4])
+    }
+
+    @Test("missing data is not a missing limit: no weekly window or no data keeps the 5-hour row")
+    func unknownIsNotAbsent() {
+        let configuration = MenuBarConfiguration(indicators: [MenuBarIndicator(window: .fiveHour, rendering: .number)])
+        #expect(MenuBarLayout.resolve(configuration, against: nil).map(\.title) == ["5h"])
+        let noWeekly = limits([window(id: "weekly_scoped:Fable", utilization: 0.1)])
+        #expect(MenuBarLayout.resolve(configuration, against: noWeekly).map(\.title) == ["5h"])
+    }
+
+    @Test("a compact pin on the 5-hour window follows it to the weekly one")
+    func compactPinsFollow() {
+        let five = MenuBarIndicator(window: .fiveHour, rendering: .number)
+        let week = MenuBarIndicator(window: .sevenDay, rendering: .number)
+        let byId = MenuBarLayout.resolve(
+            MenuBarConfiguration(indicators: [five, week], compact: .pinnedIndicator(five.id)), against: ultra)
+        #expect(byId.map(\.title) == ["7d"])
+        #expect(byId.first?.fraction == 0.16)
+
+        let byWindow = MenuBarLayout.resolve(
+            MenuBarConfiguration(indicators: [five], compact: .pinned(.fiveHour)), against: ultra)
+        #expect(byWindow.map(\.title) == ["7d"])
+        #expect(byWindow.first?.fraction == 0.16)
+    }
+}
+
+@Suite("Pace in the menu bar")
+struct MenuBarPaceTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func weekly(_ used: Double) -> UsageLimits {
+        // Three days into the week.
+        UsageLimits(windows: [RateLimitWindow(id: "weekly_all", title: "7-day", utilization: used,
+                                              resetsAt: now.addingTimeInterval(4 * 86400), isAvailable: true)],
+                    extra: nil, fetchedAt: now)
+    }
+
+    @Test("an indicator is flagged only while usage outruns the clock")
+    func flagged() {
+        let configuration = MenuBarConfiguration(indicators: [MenuBarIndicator(window: .sevenDay, rendering: .number)])
+        #expect(MenuBarLayout.resolve(configuration, against: weekly(0.60), now: now).first?.isAheadOfPace == true)
+        #expect(MenuBarLayout.resolve(configuration, against: weekly(0.40), now: now).first?.isAheadOfPace == false)
+    }
+
+    @Test("compact mode and custom labels keep the flag, and VoiceOver hears it")
+    func carried() {
+        let indicator = MenuBarIndicator(window: .sevenDay, rendering: .number, customLabel: "wk")
+        let resolved = MenuBarLayout.resolve(
+            MenuBarConfiguration(indicators: [indicator], compact: .worstOf), against: weekly(0.60), now: now)
+        #expect(resolved.first?.isAheadOfPace == true)
+        #expect(MenuBarLayout.accessibilityDescription(for: resolved) == "wk: 60 percent, ahead of pace")
+    }
+
+    @Test("older stored styles turn the pace warning on")
+    func styleDefault() throws {
+        let old = Data(#"{"leading":"","valueSize":12}"#.utf8)
+        #expect(try JSONDecoder().decode(MenuBarStyle.self, from: old).showsPaceWarning)
+        var style = MenuBarStyle.standard
+        style.showsPaceWarning = false
+        let roundTrip = try JSONDecoder().decode(MenuBarStyle.self, from: JSONEncoder().encode(style))
+        #expect(!roundTrip.showsPaceWarning)
+    }
+}

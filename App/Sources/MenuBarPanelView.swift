@@ -377,7 +377,8 @@ struct MenuBarPanelView: View {
                         title: window.title,
                         fraction: window.utilization,
                         detail: ResetCountdown.text(for: window.resetsAt),
-                        uppercaseTitle: uppercaseTitles
+                        uppercaseTitle: uppercaseTitles,
+                        pace: window.pace()
                     )
                 } else {
                     unavailableWindowRow(title: window.title)
