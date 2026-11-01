@@ -207,7 +207,8 @@ final class AccountsViewModel {
                 active: activeUuid == slot.identity.accountUuid,
                 limits: limitsByAccount[slot.identity.accountUuid],
                 stale: staleAccounts.contains(slot.identity.accountUuid),
-                staleReason: staleReasons[slot.identity.accountUuid]
+                staleReason: staleReasons[slot.identity.accountUuid],
+                livePlan: configIdentity?.accountUuid == slot.identity.accountUuid ? configIdentity?.plan : nil
             )
         }
         // The account Claude Code is signed into but Toki hasn't stored is shown first, so
@@ -501,7 +502,7 @@ final class AccountsViewModel {
         let raw = accounts.map {
             AccountSnapshot(
                 accountUuid: $0.accountUuid, label: $0.label,
-                fiveHour: $0.fiveHour, weekly: $0.weekly,
+                fiveHour: $0.fiveHourForPolicy, weekly: $0.weekly,
                 isActive: $0.isActive, isHealthy: $0.health == .ok,
                 gaugesAreStale: $0.gaugesAreStale
             )
@@ -512,7 +513,7 @@ final class AccountsViewModel {
         // policy sees `nil` for the signed-in account and can never raise a trigger.
         return AccountSnapshot.withLiveActiveLimits(
             raw,
-            activeFiveHour: AccountPresentation.fiveHour(from: activeAccountLimits),
+            activeFiveHour: AccountPresentation.fiveHourForPolicy(from: activeAccountLimits),
             activeWeekly: AccountPresentation.weekly(from: activeAccountLimits),
             liveIsFresh: liveLimitsStore.state == .ok,
             liveAccountUuid: activeAccountLimits?.account?.accountUuid

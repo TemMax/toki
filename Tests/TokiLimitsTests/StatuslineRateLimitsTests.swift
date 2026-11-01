@@ -115,9 +115,19 @@ struct StatuslineRateLimitsTests {
         #expect(replaced.id == "session" && replaced.title == "5-hour" && replaced.isAvailable)
         #expect(replaced.utilization == 0.03 && replaced.resetsAt == next)
         #expect(newer.merged(into: polled(session: (0, nil)))?.fiveHour?.utilization == 0.03)
-        #expect(newer.merged(into: polled(session: nil))?.windows.first?.id == "session")
 
         let stale = try #require(StatuslineRateLimits.parse(payload(five: (90, sessionReset)), observedAt: later))
         #expect(stale.merged(into: polled(session: (0.05, next)))?.fiveHour?.utilization == 0.05)
+    }
+
+    @Test("an account with no 5-hour limit keeps none, even when Claude Code still reports one")
+    func noFiveHourLimitStaysAbsent() throws {
+        let later = polledAt.addingTimeInterval(20)
+        let sample = try #require(StatuslineRateLimits.parse(payload(five: (3, sessionReset), week: (70, weekReset)),
+                                                            observedAt: later))
+        let merged = try #require(sample.merged(into: polled(session: nil)))
+        #expect(merged.fiveHour == nil)
+        #expect(merged.hasNoFiveHourLimit)
+        #expect(merged.sevenDay?.utilization == 0.70)
     }
 }

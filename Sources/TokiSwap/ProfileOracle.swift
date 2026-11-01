@@ -83,6 +83,9 @@ public struct ProfileOracle: ProfileLookup {
         if let organization = root["organization"] as? [String: Any] {
             mapped["organizationName"] = organization["name"]
             mapped["organizationUuid"] = organization["uuid"]
+            // The same plan fields Claude Code copies into `oauthAccount`.
+            mapped["organizationType"] = organization["organization_type"]
+            mapped["organizationRateLimitTier"] = organization["rate_limit_tier"]
         }
         return mapped.compactMapValues { $0 }
     }

@@ -588,7 +588,8 @@ struct LimitsStrip: View {
                 fraction: window.utilization,
                 detail: window.isAvailable ? relativeReset(window.resetsAt) : nil,
                 isUnavailable: !window.isAvailable,
-                uppercaseTitle: uppercaseTitles
+                uppercaseTitle: uppercaseTitles,
+                pace: window.pace()
             )
         case let .extra(extra):
             ExtraUsageTile(extra: extra)

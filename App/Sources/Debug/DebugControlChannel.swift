@@ -269,7 +269,7 @@ enum DebugControlChannel {
 
     private static let commands = [
         "surfaces", "scenario", "navigate", "snapshot", "windows", "tree", "click", "appearance",
-        "resize", "scroll",
+        "resize", "scroll", "drag",
     ]
 
     /// `scroll` runs for seconds and must leave the main thread free while it does — a
@@ -279,9 +279,10 @@ enum DebugControlChannel {
         guard
             let data = line.data(using: .utf8),
             let request = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-            request["cmd"] as? String == "scroll"
+            let command = request["cmd"] as? String, command == "scroll" || command == "drag"
         else { return respond(to: line) }
-        return await scroll(request["args"] as? [String: Any] ?? [:])
+        let args = request["args"] as? [String: Any] ?? [:]
+        return command == "drag" ? await drag(args) : await scroll(args)
     }
 
     private static func respond(to line: String) -> String {
@@ -307,6 +308,7 @@ enum DebugControlChannel {
         case "appearance": return appearance(args)
         case "resize":     return resize(args)
         case "scroll":     return fail("scroll is handled asynchronously")
+        case "drag":       return fail("drag is handled asynchronously")
         default:
             return fail("unknown command \"\(command)\"; valid commands: \(commands.joined(separator: ", "))")
         }
@@ -763,6 +765,59 @@ enum DebugControlChannel {
         // and reporting it back would look like the resize had been clamped.
         let size = window.contentRect(forFrameRect: window.frame).size
         return ok(["width": Int(size.width.rounded()), "height": Int(size.height.rounded())])
+    }
+
+    /// A left-button mouse drag delivered straight to one of this app's windows with
+    /// `NSWindow.sendEvent`: down at `from`, a series of dragged events, up at `to`. Points
+    /// are measured from the top-left of the window (`{"sheet":true}` picks the open sheet,
+    /// otherwise the key or dashboard window). In-process, so it needs no Accessibility grant
+    /// and never moves the user's real pointer. It drives SwiftUI gestures; it cannot start a
+    /// system drag-and-drop session, which needs the window server.
+    private static func drag(_ args: [String: Any]) async -> String {
+        func point(_ key: String) -> CGPoint? {
+            guard let pair = args[key] as? [NSNumber], pair.count == 2 else { return nil }
+            return CGPoint(x: pair[0].doubleValue, y: pair[1].doubleValue)
+        }
+        guard let from = point("from"), let to = point("to") else {
+            return fail("drag needs {\"from\":[x,y],\"to\":[x,y]} in points from the window's top-left")
+        }
+        let steps = max(2, min((args["steps"] as? NSNumber)?.intValue ?? 20, 200))
+        let wantsSheet = args["sheet"] as? Bool ?? false
+        guard let window = wantsSheet
+            ? NSApp.windows.first(where: { $0.isSheet && $0.isVisible })
+            : targetWindow(args)
+        else { return fail(noWindow) }
+        // A mouse-down in a window that is not key is spent activating it, and SwiftUI never
+        // sees the gesture start. `"activate":true` brings the app forward first. It steals
+        // focus, which every other command here avoids, so it is opt-in.
+        if args["activate"] as? Bool == true {
+            NSApp.activate(ignoringOtherApps: true)
+            (window.sheetParent ?? window).makeKeyAndOrderFront(nil)
+            window.makeKey()
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+
+        let height = window.frame.height
+        func send(_ type: NSEvent.EventType, _ topLeft: CGPoint) {
+            let location = CGPoint(x: topLeft.x, y: height - topLeft.y)
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: location, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1
+            ) else { return }
+            window.sendEvent(event)
+        }
+        send(.leftMouseDown, from)
+        try? await Task.sleep(for: .milliseconds(60))
+        for step in 1...steps {
+            let t = CGFloat(step) / CGFloat(steps)
+            send(.leftMouseDragged, CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t))
+            try? await Task.sleep(for: .milliseconds(16))
+        }
+        try? await Task.sleep(for: .milliseconds(60))
+        send(.leftMouseUp, to)
+        try? await Task.sleep(for: .milliseconds(120))
+        return ok(["window": window.title, "sheet": window.isSheet, "steps": steps])
     }
 
     /// Opens `section` (unfocused, as `navigate` does), waits for its content to outgrow the
